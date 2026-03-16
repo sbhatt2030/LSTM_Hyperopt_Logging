@@ -1,0 +1,11 @@
+experiment_name,base_loss,l2_weight,jacobian_weight,hidden_derivative_weight,jacobian_every_n_batches,hidden_derivative_every_n_batches,model_type,hidden_size,num_layers,dropout,learning_rate,data_file_path,target_timesteps,downsample_factor,axis_selection,batch_size,random_seed,device,save_model_path,save_best_only,load_model_path,load_model_strict,notes
+baseline_mse,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,100,10,x,64,1,cuda,models/exp_0.pt,TRUE,,,Baseline MSE only
+baseline_mae,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,100,1,x,64,2,cuda,models/exp_1.pt,TRUE,models/exp_0.pt,TRUE,Baseline MAE only
+l2_reg,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,800,10,x,64,3,cuda,models/exp_2.pt,TRUE,models/exp_1.pt,TRUE,L2 weight decay
+jacobian_frob,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,800,1,x,64,4,cuda,models/exp_3.pt,TRUE,models/exp_2.pt,TRUE,Jacobian Frobenius norm
+hidden_deriv,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,1000,8,x,64,5,cuda,models/exp_4.pt,TRUE,models/exp_3.pt,TRUE,Hidden state derivative
+jac_hidden,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,1000,1,x,64,6,cuda,models/exp_5.pt,TRUE,models/exp_4.pt,TRUE,Jacobian + Hidden
+all_reg,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,8000,1,x,64,7,cuda,models/exp_6.pt,TRUE,models/exp_5.pt,TRUE,All regularization
+l2_hidden,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,8000,1,x,64,8,cuda,models/exp_7.pt,TRUE,models/exp_6.pt,TRUE,L2 + Hidden derivative
+search_jac_weight,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,8000,1,x,64,9,cuda,models/exp_8.pt,TRUE,models/exp_7.pt,TRUE,Low Jacobian weight
+search_hidden_weight,mse,0,0,0,1,1,lstm,16,2,0,0.001,data/clean_temp.npy,8000,1,x,64,10,cuda,models/exp_9.pt,TRUE,models/exp_8.pt,TRUE,Low Hidden weight

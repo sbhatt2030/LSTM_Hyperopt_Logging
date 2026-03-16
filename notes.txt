@@ -1,0 +1,12 @@
+train_val_loop_v10:
+    Moved config epochs back to 10
+    Removed constants_simplified
+    hard coded dataschema num columns
+    deleted a bunch of commented out code for some reason
+    added mlflow_experiment_id param
+    added mlflow logging
+run_experiment:
+    added the extra_configs dictionary which can be used to override and add stuff to base config
+    added a exp_id of -1
+entry_point:
+    added mlflow initialization for standard training runs. 

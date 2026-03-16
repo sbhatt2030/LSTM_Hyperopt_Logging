@@ -1,0 +1,8 @@
+.venv/
+mlartifacts/
+mlruns/
+models/
+plots/
+data/
+*.db
+__pycache__/
