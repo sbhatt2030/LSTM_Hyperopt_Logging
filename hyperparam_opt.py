@@ -75,7 +75,7 @@ def main():
 if __name__ == "__main__":
     ray.init(include_dashboard=False)
     
-    uri = "http://localhost:5000"
+    uri = "http://localhost:8090"
     mlflow.set_tracking_uri(uri)
     ExpName = time.asctime()
     mlflow.set_experiment(ExpName)

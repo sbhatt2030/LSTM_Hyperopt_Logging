@@ -1,0 +1,1 @@
+mlflow server -h 0.0.0.0 -p 8090 --backend-store-uri sqlite:///reversal_comp --default-artifact-root 'file:/home/bhatts/mlartifacts --allowed-hosts "hurco-lambda.hurco.com:8090,172.16.1.71:8090" --cors-allowed-origins http://hurco-lambda.hurco.com:8090,http://172.16.1.71:8090
