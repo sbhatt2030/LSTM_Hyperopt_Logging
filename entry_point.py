@@ -24,7 +24,7 @@ def init_mlflow(Tracking_URI: str) -> int:
     mlflow.enable_system_metrics_logging()
     return exp_id
 
-exp_id = init_mlflow("http://localhost:8090")
+exp_id = init_mlflow("http://hurco-lambda.hurco.com:8090")
 extra_configs = {'mlflow_experiment_id' : exp_id}
 # Example: Run first experiment in CSV
 final_val_loss = run_experiment('experiment.csv', 'config.json', 0, extra_configs)

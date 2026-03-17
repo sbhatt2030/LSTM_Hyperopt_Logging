@@ -1062,7 +1062,7 @@ def train_model(
 
     #Logging
     mlflow_experiment_id:int = 0,
-    tracking_uri:str = "http://localhost:8090",
+    tracking_uri:str = "http://hurco-lambda.hurco.com:8090",
     
     # Early stopping parameters
     early_stopping_patience: int = 10,
@@ -1598,7 +1598,7 @@ def train_model(
                 print(f"Saved final model to {final_path}")
                 if history and len(history['val_loss']) > 0:
                     print(f"  (Final val loss: {history['val_loss'][-1]:.6f})")
-            mlflow.pytorch.log_model(model.state_dict(), name= f"model_final")
+            mlflow.pytorch.log_model(model(), name= f"model_final")
     
     # ========================================================================
     # STEP 10: GENERATE VISUALIZATIONS
