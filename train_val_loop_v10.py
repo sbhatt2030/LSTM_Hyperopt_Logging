@@ -1134,8 +1134,8 @@ def train_model(
 
     
     if verbose >= 1:
-        print(f"\nÃ¢â€ â€™ Input size: {input_size} (features: {dataset.feature_names})")
-        print(f"Ã¢â€ â€™ Output size: {output_size} (errors: {error_names})")
+        print(f"Input size: {input_size} (features: {dataset.feature_names})")
+        print(f"Output size: {output_size} (errors: {error_names})")
     
     
     dataset_stats = {
@@ -1230,22 +1230,22 @@ def train_model(
         # Load pretrained weights if specified
         if load_model_path is not None:
             if verbose >= 1:
-                print(f"\nÃ¢â€ â€™ Loading pretrained model from: {load_model_path}")
+                print(f"\nLoading pretrained model from: {load_model_path}")
             
             try:
                 state_dict = torch.load(load_model_path, map_location=device)
                 model.load_state_dict(state_dict, strict=load_model_strict)
                 
                 if verbose >= 1:
-                    print(f"  Ã¢Å“â€œ Successfully loaded model weights")
+                    print(f"Successfully loaded model weights")
                     if not load_model_strict:
-                        print(f"  Ã¢Å¡Â  Non-strict loading - some weights may not match")
+                        print(f"Non-strict loading - some weights may not match")
             
             except FileNotFoundError:
                 raise FileNotFoundError(f"Model file not found: {load_model_path}")
             except RuntimeError as e:
                 if "size mismatch" in str(e) or "Missing key" in str(e):
-                    print(f"\nÃ¢Å“â€” Model architecture mismatch!")
+                    print(f"\nModel architecture mismatch!")
                     print(f"  Error: {e}")
                     print(f"\n  The saved model doesn't match current architecture:")
                     print(f"    Current: {model_type.upper()} with {num_layers} layers, {hidden_size} hidden units")
@@ -1508,7 +1508,7 @@ def train_model(
                     if save_best_only:
                         torch.save(best_model_state, save_model_path)
                         if verbose >= 1:
-                            print(f"  💾 Saved best model to {save_model_path}")
+                            print(f"Saved best model to {save_model_path}")
             
             # #LOG_PER_EPOCH - Best validation loss so far
             epoch_best_val_loss = best_val_loss
@@ -1539,11 +1539,8 @@ def train_model(
         if verbose >= 1:
             print(f"  Epoch time: {epoch_time:.2f}s")
     if best_model_state:
-        mlflow.pytorch.log_state_dict(best_model_state, "model")
-        #mlflow.pytorch.log_model(best_model_state, name = f"model_epoch_{best_epoch+1}")
-    else:
-        mlflow.pytorch.log_state_dict(model.state_dict(), "model")
-        mlflow.pytorch.log_model(model.state_dict(), name = f"model_epoch_{best_epoch+1}")
+        model.load_state_dict(best_model_state)  # restore best weights onto model before logging
+    mlflow.pytorch.log_model(model, name="model_best")
         
     # ========================================================================
     # STEP 9: TRAINING SUMMARY
@@ -1581,24 +1578,24 @@ def train_model(
         if save_best_only:
             # Already saved during training, just confirm
             if verbose >= 1:
-                print(f"✓ Best model saved to {save_model_path}")
+                print(f"Best model saved to {save_model_path}")
                 print(f"  (Best val loss: {best_val_loss:.6f})")
         else:
             # Save both best and final
             if best_model_state is not None:
                 best_path = save_path.parent / f"{save_path.stem}_best{save_path.suffix}"
-                torch.save(best_model_state, best_path)
+                torch.save(model, best_path)
                 if verbose >= 1:
                     print(f"Saved best model to {best_path}")
                     print(f"(Best val loss: {best_val_loss:.6f})")
             
             final_path = save_path.parent / f"{save_path.stem}_final{save_path.suffix}"
-            torch.save(model.state_dict(), final_path)
+            torch.save(model, final_path)
             if verbose >= 1:
                 print(f"Saved final model to {final_path}")
                 if history and len(history['val_loss']) > 0:
                     print(f"  (Final val loss: {history['val_loss'][-1]:.6f})")
-            mlflow.pytorch.log_model(model(), name= f"model_final")
+            mlflow.pytorch.log_model(model, name="model_final")
     
     # ========================================================================
     # STEP 10: GENERATE VISUALIZATIONS
@@ -1619,6 +1616,6 @@ def train_model(
 
 
 if __name__ == "__main__":
-    print("Training Pipeline v9")
+    print("Training Pipeline v10")
     print("See logging_guide.py for logging documentation")
     print("See test_suite.py for testing framework")
