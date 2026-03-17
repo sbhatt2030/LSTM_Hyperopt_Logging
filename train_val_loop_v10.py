@@ -956,7 +956,7 @@ def plot_predictions(
             filepath = save_path / filename
             plt.savefig(filepath, dpi=150, bbox_inches='tight')
             plt.close()
-            mlflow.log_figure(plt, str(filepath))
+            mlflow.log_figure(fig, str(filepath))
             
             if (plot_idx + 1) % 5 == 0:
                 print(f"  Saved {plot_idx + 1}/{len(indices)} plots...")
@@ -1062,6 +1062,7 @@ def train_model(
 
     #Logging
     mlflow_experiment_id:int = 0,
+    tracking_uri:str = "http://localhost:8090",
     
     # Early stopping parameters
     early_stopping_patience: int = 10,
@@ -1095,7 +1096,7 @@ def train_model(
     """
     
     ####MAKE MLFLOW RUN
-    
+    mlflow.set_tracking_uri(tracking_uri)
     run = mlflow.start_run(experiment_id=str(mlflow_experiment_id), log_system_metrics=True)
     
     if verbose >= 1:
@@ -1538,8 +1539,10 @@ def train_model(
         if verbose >= 1:
             print(f"  Epoch time: {epoch_time:.2f}s")
     if best_model_state:
-        mlflow.pytorch.log_model(best_model_state, name = f"model_epoch_{best_epoch+1}")
+        mlflow.pytorch.log_state_dict(best_model_state, "model")
+        #mlflow.pytorch.log_model(best_model_state, name = f"model_epoch_{best_epoch+1}")
     else:
+        mlflow.pytorch.log_state_dict(model.state_dict(), "model")
         mlflow.pytorch.log_model(model.state_dict(), name = f"model_epoch_{best_epoch+1}")
         
     # ========================================================================

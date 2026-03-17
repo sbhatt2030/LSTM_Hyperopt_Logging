@@ -33,8 +33,7 @@ def objective(hyperopt_params):
 def main():
     print("HyperParam_Opt started")
     os.environ['RAY_CHDIR_TO_TRIAL_DIR'] = "0"
-    initial_params = [{"base_loss": 'mse', "l2_weight": 1e-4, "jacobian_weight": 1e-4,  "hidden_derivative_weight" : 1e-4, "model_type": 'lstm', "hidden_size": 16, "num_layers": 2, "dropout": 0, "learning_rate":.001, "random_seed": 0}]
-    ## I noted that hidden_size is supposed to be between 1 and 4, while the defualt is 64, and the defualt experiments all use 16. These all seem quite far off from each other. Just wanted to confirm that this range is correct. 
+    initial_params = [{"base_loss": 'mse', "l2_weight": 1e-4, "jacobian_weight": 1e-4,  "hidden_derivative_weight" : 1e-4, "model_type": 'lstm', "hidden_size": 3, "num_layers": 2, "dropout": 0, "learning_rate":.001}]
    
     algo = OptunaSearch(points_to_evaluate=initial_params)
     algo = Repeater(algo, repeat=2)
@@ -85,4 +84,5 @@ if __name__ == "__main__":
        print("experiment not found")
        sys.exit(0)
     mlflow.enable_system_metrics_logging()
+    print(f"Training on: {uri} with experiment id {ExpID}")
     main()
