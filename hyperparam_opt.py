@@ -16,11 +16,16 @@ def objective(hyperopt_params):
     #print(hyperopt_params)
     extra_configs = {k:v for k,v in hyperopt_params.items() if k != '__trial_index__'}
     extra_configs['save_model_path'] = f'models/exp_{hyperopt_params['__trial_index__']}'
-    extra_configs['data_file_path'] = 'data/clean_temp.npy'
+    extra_configs['data_file_path'] = 'data/complete_error_prediction_data.npy'
     extra_configs['verbose'] = 0
-    extra_configs['target_timesteps'] = 100
+    extra_configs['downsample_factor'] = 8
+    extra_configs['target_timesteps'] = 1000
     extra_configs['device'] = 'cuda'
     extra_configs['batch_size'] = 64
+    extra_configs['base_loss'] = 'mse'
+    extra_configs['l2_weight'] = 1e-4
+    extra_configs['jacobian_weight'] = 1e-4
+    extra_configs['hidden_derivative_weight'] = 1e-4
     extra_configs['mlflow_experiment_id'] = ExpID
     extra_configs['hidden_size'] = 2 ** extra_configs['hidden_size'] 
     final_val_loss = run_experiment('experiment.csv', 'config.json', -1, extra_configs)
@@ -33,8 +38,14 @@ def objective(hyperopt_params):
 def main():
     print("HyperParam_Opt started")
     os.environ['RAY_CHDIR_TO_TRIAL_DIR'] = "0"
-    initial_params = [{"base_loss": 'mse', "l2_weight": 1e-4, "jacobian_weight": 0,  "hidden_derivative_weight" : 0, "model_type": 'lstm', "hidden_size": 3, "num_layers": 2, "dropout": 0, "learning_rate":.001}]
-   
+    initial_params = [{
+        "model_type": 'lstm',
+        "learning_rate": 0.001,
+        "hidden_size": 3,
+        "num_layers": 2,
+        "dropout": 0.0,
+        "batch_size": 64
+    }]
     algo = OptunaSearch(points_to_evaluate=initial_params)
     algo = Repeater(algo, repeat=3)
     algo = ConcurrencyLimiter(algo, max_concurrent=5)

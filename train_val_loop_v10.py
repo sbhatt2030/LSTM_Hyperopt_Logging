@@ -3,21 +3,20 @@ Training Pipeline for Time Series Error Prediction v9 (Simplified Regularization
 Works with preprocessed data from data_cleaning_pipeline.py
 
 Expected Input Data Format:
-    - Shape: (n_samples, timesteps, 16)
+    - Shape: (n_samples, timesteps, 12)
     - Columns 0-2: pos_x, pos_y, pos_z (normalized, micron-rounded)
     - Columns 3-5: vel_x, vel_y, vel_z (normalized, pre-computed)
     - Columns 6-8: accel_x, accel_y, accel_z (normalized, pre-computed)
-    - Columns 9-14: e_enc_x/y/z, e_scale_x/y/z (normalized, filtered)
-    - Column 15: has_motion (binary)
+    - Columns 9-11: e_scale_x/y/z (normalized, filtered)
 
 Model Configurations:
-    - Min model: axis_selection='x', errors auto=[9,12]
+    - Min model: axis_selection='x', errors auto=[9]
       Input: pos_x (+ optional vel_x, accel_x)
-      Output: e_enc_x, e_scale_x
+      Output: e_scale_x
     
-    - Max model: axis_selection='all', errors auto=[9,10,11,12,13,14]
+    - Max model: axis_selection='all', errors auto=[9,10,11]
       Input: pos/vel/accel for all axes (9 features if all enabled)
-      Output: All 6 error signals
+      Output: All 3 error signals
 
 Configurable input features, comprehensive loss functions, model validation
 
@@ -56,15 +55,13 @@ COLUMN_STRUCTURE = {
     'pos_x': 0, 'pos_y': 1, 'pos_z': 2,
     'vel_x': 3, 'vel_y': 4, 'vel_z': 5,
     'accel_x': 6, 'accel_y': 7, 'accel_z': 8,
-    'e_enc_x': 9, 'e_enc_y': 10, 'e_enc_z': 11,
-    'e_scale_x': 12, 'e_scale_y': 13, 'e_scale_z': 14,
-    'has_motion': 15
+    'e_scale_x': 9, 'e_scale_y': 10, 'e_scale_z': 11
 }
 
 AXIS_COLUMNS = {
-    'x': {'pos': 0, 'vel': 3, 'accel': 6, 'e_enc': 9, 'e_scale': 12},
-    'y': {'pos': 1, 'vel': 4, 'accel': 7, 'e_enc': 10, 'e_scale': 13},
-    'z': {'pos': 2, 'vel': 5, 'accel': 8, 'e_enc': 11, 'e_scale': 14}
+    'x': {'pos': 0, 'vel': 3, 'accel': 6, 'e_scale': 9},
+    'y': {'pos': 1, 'vel': 4, 'accel': 7, 'e_scale': 10},
+    'z': {'pos': 2, 'vel': 5, 'accel': 8, 'e_scale': 11}
 }
 
 class TimeSeriesDataset(Dataset):
@@ -73,7 +70,6 @@ class TimeSeriesDataset(Dataset):
         data_file_path: str,
         target_timesteps: int,
         axis_selection: str,  # 'x', 'y', 'z', or 'all'
-        motion_col_idx: int,
         downsample_factor: int = 1,
         include_velocity: bool = True,
         include_acceleration: bool = True,
@@ -84,7 +80,6 @@ class TimeSeriesDataset(Dataset):
     ):
         self.target_timesteps = target_timesteps
         self.axis_selection = axis_selection.lower()
-        self.motion_col_idx = motion_col_idx
         self.downsample_factor = downsample_factor
         self.include_velocity = include_velocity
         self.include_acceleration = include_acceleration
@@ -100,12 +95,12 @@ class TimeSeriesDataset(Dataset):
         print(f"Loading preprocessed data from {data_file_path}...")
         data = np.load(data_file_path)
         print(f"Loaded data shape: {data.shape}")
-        print("  Expected format: (samples, timesteps, 16 features)")
-        print("  Features: pos(3), vel(3), accel(3), errors(6), motion(1)")
+        print("  Expected format: (samples, timesteps, 12 features)")
+        print("  Features: pos(3), vel(3), accel(3), e_scale(3)")
         # Validate data format
-        if data.shape[2] != 16:
+        if data.shape[2] != 12:
             raise ValueError(
-                f"Data has {data.shape[2]} features, expected {16}. "
+                f"Data has {data.shape[2]} features, expected {12}. "
                 f"Ensure data is from data_cleaning_pipeline.py"
             )
         
@@ -134,12 +129,25 @@ class TimeSeriesDataset(Dataset):
         data_reshaped = data.reshape(m * n_windows, target_timesteps, n_features)
         print(f"Reshaped data shape: {data_reshaped.shape}")
         
-        # Filter by motion threshold
-        print(f"Filtering samples with >{motion_threshold*100:.0f}% no-motion...")
-        motion_data = data_reshaped[:, :, motion_col_idx]
-        motion_fraction = np.mean(motion_data == 0, axis=1)
-        motion_mask = motion_fraction <= motion_threshold
-        
+        # Filter by motion: keep windows where enough timesteps have non-negligible velocity.
+        # Uses commanded velocity columns (3-5) as a proxy for the removed has_motion flag.
+        # A timestep is "moving" when the RMS velocity across the relevant axes exceeds
+        # motion_threshold is re-interpreted here as the *minimum fraction of timesteps*
+        # that must be moving (i.e. windows with too little motion are dropped).
+        print(f"Filtering samples with <{motion_threshold*100:.0f}% moving timesteps (velocity-based)...")
+        if self.axis_selection == 'all':
+            vel_cols = [3, 4, 5]
+        else:
+            vel_cols = [AXIS_COLUMNS[self.axis_selection]['vel']]
+
+        vel_data = data_reshaped[:, :, vel_cols]                        # (samples, timesteps, n_vel)
+        vel_magnitude = np.sqrt(np.sum(vel_data ** 2, axis=-1))         # (samples, timesteps)
+        # Use the 99th-percentile of all velocities as a normalisation reference so the
+        # threshold is data-relative rather than unit-dependent.
+        vel_scale = np.percentile(vel_magnitude, 99) + 1e-8
+        moving_fraction = np.mean(vel_magnitude / vel_scale > 0.01, axis=1)  # (samples,)
+        motion_mask = moving_fraction >= (1.0 - motion_threshold)
+
         n_before = len(data_reshaped)
         data_filtered = data_reshaped[motion_mask]
         n_after_motion = len(data_filtered)
@@ -231,10 +239,7 @@ class TimeSeriesDataset(Dataset):
                     feature_names.append(f'accel_{axis}')
                 
                 # Errors (always for output)
-                error_indices.extend([
-                    AXIS_COLUMNS[axis]['e_enc'],
-                    AXIS_COLUMNS[axis]['e_scale']
-                ])
+                error_indices.append(AXIS_COLUMNS[axis]['e_scale'])
         else:
             # Single axis
             axis = axis_selection
@@ -254,10 +259,7 @@ class TimeSeriesDataset(Dataset):
                 feature_names.append(f'accel_{axis}')
             
             # Errors (always for output)
-            error_indices = [
-                AXIS_COLUMNS[axis]['e_enc'],
-                AXIS_COLUMNS[axis]['e_scale']
-            ]
+            error_indices = [AXIS_COLUMNS[axis]['e_scale']]
         
         return feature_indices, feature_names, error_indices
     
@@ -869,7 +871,7 @@ def plot_predictions(
     device: str,
     save_dir: str = 'results',
     dataset_name: str = 'train',
-    error_names: List[str] = ['e_enc', 'e_scale']
+    error_names: List[str] = ['e_scale']
 ):
     """Plot predictions: position input, error signals, and deltas only."""
     model.eval()
@@ -892,59 +894,61 @@ def plot_predictions(
             
             position = X[:, 0]
             delta = y_pred - y_true
-            
-            fig, axes = plt.subplots(4, 1, figsize=(14, 12))
-            fig.suptitle(f'{dataset_name.capitalize()} Sample {sample_idx} - Predictions vs Actual', 
+            num_outputs = y_true.shape[-1]
+
+            n_rows = 2 + num_outputs  # position + one row per output + delta
+            fig, axes = plt.subplots(n_rows, 1, figsize=(14, 4 * n_rows))
+            fig.suptitle(f'{dataset_name.capitalize()} Sample {sample_idx} - Predictions vs Actual',
                         fontsize=16, fontweight='bold')
-            
+
             timesteps = np.arange(len(position))
-            
+
             # Plot 1: Position Input
             axes[0].plot(timesteps, position, 'b-', linewidth=1.5, label='Position')
             axes[0].set_ylabel('Position (normalized)', fontsize=11, fontweight='bold')
             axes[0].set_title('Input: Position Signal', fontsize=12)
             axes[0].grid(True, alpha=0.3)
             axes[0].legend(loc='upper right')
-            
-            # Plot 2: Error Signal 1
-            axes[1].plot(timesteps, y_true[:, 0], 'g-', linewidth=1.5, 
-                        label=f'Actual {error_names[0]}', alpha=0.7)
-            axes[1].plot(timesteps, y_pred[:, 0], 'r--', linewidth=1.5, 
-                        label=f'Predicted {error_names[0]}', alpha=0.7)
-            axes[1].set_ylabel(f'{error_names[0]} (normalized)', fontsize=11, fontweight='bold')
-            axes[1].set_title(f'Output 1: {error_names[0]}', fontsize=12)
-            axes[1].grid(True, alpha=0.3)
-            axes[1].legend(loc='upper right')
-            
-            # Plot 3: Error Signal 2
-            axes[2].plot(timesteps, y_true[:, 1], 'g-', linewidth=1.5, 
-                        label=f'Actual {error_names[1]}', alpha=0.7)
-            axes[2].plot(timesteps, y_pred[:, 1], 'r--', linewidth=1.5, 
-                        label=f'Predicted {error_names[1]}', alpha=0.7)
-            axes[2].set_ylabel(f'{error_names[1]} (normalized)', fontsize=11, fontweight='bold')
-            axes[2].set_title(f'Output 2: {error_names[1]}', fontsize=12)
-            axes[2].grid(True, alpha=0.3)
-            axes[2].legend(loc='upper right')
-            
-            # Plot 4: Prediction Errors (Delta)
-            axes[3].plot(timesteps, delta[:, 0], 'purple', linewidth=1.5, 
-                        label=f'ÃŽâ€ {error_names[0]}', alpha=0.7)
-            axes[3].plot(timesteps, delta[:, 1], 'orange', linewidth=1.5, 
-                        label=f'ÃŽâ€ {error_names[1]}', alpha=0.7)
-            axes[3].axhline(y=0, color='k', linestyle='--', linewidth=0.8, alpha=0.5)
-            axes[3].set_xlabel('Timestep', fontsize=11, fontweight='bold')
-            axes[3].set_ylabel('Prediction Error (ÃŽâ€)', fontsize=11, fontweight='bold')
-            axes[3].set_title('Prediction Error (Predicted - Actual)', fontsize=12)
-            axes[3].grid(True, alpha=0.3)
-            axes[3].legend(loc='upper right')
-            
-            mae_1 = np.mean(np.abs(delta[:, 0]))
-            mae_2 = np.mean(np.abs(delta[:, 1]))
-            rmse_1 = np.sqrt(np.mean(delta[:, 0]**2))
-            rmse_2 = np.sqrt(np.mean(delta[:, 1]**2))
-            
-            stats_text = f'MAE: {error_names[0]}={mae_1:.6f}, {error_names[1]}={mae_2:.6f}\n'
-            stats_text += f'RMSE: {error_names[0]}={rmse_1:.6f}, {error_names[1]}={rmse_2:.6f}'
+
+            # One subplot per output signal
+            colors_true = ['g', 'c', 'm']
+            colors_pred = ['r', 'orange', 'purple']
+            for i in range(num_outputs):
+                label = error_names[i] if i < len(error_names) else f'output_{i}'
+                axes[i + 1].plot(timesteps, y_true[:, i],
+                                 f'{colors_true[i % len(colors_true)]}-',
+                                 linewidth=1.5, label=f'Actual {label}', alpha=0.7)
+                axes[i + 1].plot(timesteps, y_pred[:, i],
+                                 f'{colors_pred[i % len(colors_pred)]}--',
+                                 linewidth=1.5, label=f'Predicted {label}', alpha=0.7)
+                axes[i + 1].set_ylabel(f'{label} (normalized)', fontsize=11, fontweight='bold')
+                axes[i + 1].set_title(f'Output {i + 1}: {label}', fontsize=12)
+                axes[i + 1].grid(True, alpha=0.3)
+                axes[i + 1].legend(loc='upper right')
+
+            # Final plot: Prediction Errors (Delta)
+            delta_ax = axes[-1]
+            delta_colors = ['purple', 'orange', 'brown']
+            for i in range(num_outputs):
+                label = error_names[i] if i < len(error_names) else f'output_{i}'
+                delta_ax.plot(timesteps, delta[:, i],
+                              color=delta_colors[i % len(delta_colors)],
+                              linewidth=1.5, label=f'Δ{label}', alpha=0.7)
+            delta_ax.axhline(y=0, color='k', linestyle='--', linewidth=0.8, alpha=0.5)
+            delta_ax.set_xlabel('Timestep', fontsize=11, fontweight='bold')
+            delta_ax.set_ylabel('Prediction Error (Δ)', fontsize=11, fontweight='bold')
+            delta_ax.set_title('Prediction Error (Predicted - Actual)', fontsize=12)
+            delta_ax.grid(True, alpha=0.3)
+            delta_ax.legend(loc='upper right')
+
+            stats_lines = []
+            for i in range(num_outputs):
+                label = error_names[i] if i < len(error_names) else f'output_{i}'
+                mae_i = np.mean(np.abs(delta[:, i]))
+                rmse_i = np.sqrt(np.mean(delta[:, i] ** 2))
+                stats_lines.append(f'MAE {label}={mae_i:.6f}  RMSE {label}={rmse_i:.6f}')
+            stats_text = '\n'.join(stats_lines)
+
             
             fig.text(0.99, 0.01, stats_text, ha='right', va='bottom', 
                     fontsize=9, family='monospace',
@@ -971,7 +975,7 @@ def visualize_predictions(
     num_samples: int = 10,
     save_dir: str = 'results',
     random_seed: int = 42,
-    error_names: List[str] = ['e_enc', 'e_scale']
+    error_names: List[str] = ['e_scale']
 ):
     """Visualize predictions on both train and validation sets."""
     print("\n" + "="*80)
@@ -1024,7 +1028,6 @@ def train_model(
     # Data parameters
     data_file_path: str,
     target_timesteps: int,
-    motion_col_idx: int = 15,
     axis_selection: str = 'x',
     downsample_factor: int = 1,
     include_velocity: bool = True,
@@ -1084,7 +1087,7 @@ def train_model(
     generate_plots: bool = True,
     num_plot_samples: int = 10,
     plot_save_dir: str = 'results',
-    error_names: List[str] = ['e_enc', 'e_scale']
+    error_names: List[str] = ['e_scale']
 ) -> Tuple[nn.Module, Optional[Dict[str, list]], int]:
     """
     Master training function for time series error prediction.
@@ -1118,7 +1121,6 @@ def train_model(
         data_file_path=data_file_path,
         target_timesteps=target_timesteps,
         axis_selection=axis_selection,
-        motion_col_idx=motion_col_idx,
         downsample_factor=downsample_factor,
         include_velocity=include_velocity,
         include_acceleration=include_acceleration,
@@ -1396,7 +1398,6 @@ def train_model(
         'data_file_path': data_file_path,
         'target_timesteps': target_timesteps,
         'axis_selection': axis_selection,
-        'motion_col_idx': motion_col_idx,
         'downsample_factor': downsample_factor,
         'include_velocity': include_velocity,
         'include_acceleration': include_acceleration,
@@ -1540,8 +1541,7 @@ def train_model(
             print(f"  Epoch time: {epoch_time:.2f}s")
     if best_model_state:
         model.load_state_dict(best_model_state)  # restore best weights onto model before logging
-    mlflow.pytorch.log_model(model, name="model_best")
-        
+    mlflow.pytorch.log_model(model, name="model_best")  
     # ========================================================================
     # STEP 9: TRAINING SUMMARY
     # ========================================================================
