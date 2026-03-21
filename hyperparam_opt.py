@@ -33,14 +33,14 @@ def objective(hyperopt_params):
 def main():
     print("HyperParam_Opt started")
     os.environ['RAY_CHDIR_TO_TRIAL_DIR'] = "0"
-    initial_params = [{"base_loss": 'mse', "l2_weight": 1e-4, "jacobian_weight": 1e-4,  "hidden_derivative_weight" : 1e-4, "model_type": 'lstm', "hidden_size": 3, "num_layers": 2, "dropout": 0, "learning_rate":.001}]
+    initial_params = [{"base_loss": 'mse', "l2_weight": 1e-4, "jacobian_weight": 0,  "hidden_derivative_weight" : 0, "model_type": 'lstm', "hidden_size": 3, "num_layers": 2, "dropout": 0, "learning_rate":.001}]
    
     algo = OptunaSearch(points_to_evaluate=initial_params)
-    algo = Repeater(algo, repeat=2)
+    algo = Repeater(algo, repeat=3)
     algo = ConcurrencyLimiter(algo, max_concurrent=5)
 
     num_samples = 100
-    SearchDf = pd.read_csv("search.csv")
+    SearchDf = pd.read_csv("search_phase_1.csv")
     search_config = {}
     for index in SearchDf.index:
         k = SearchDf.loc[index]
