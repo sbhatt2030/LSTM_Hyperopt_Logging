@@ -1,10 +1,6 @@
 Name,type,1,2,3,info
-base_loss,choice,mse,mae,,"choice [mse,mae]"
-l2_weight,loguniform,1e-20,1,,"loguniform[0,1]"
-jacobian_weight,uniform,0,5,,"uniform[0,5]"
-hidden_derivative_weight,uniform,0,5,,"uniform[0,5]"
-model_type,choice,lstm,gru,"choice [LSTM,GRU]"
-num_layers,randint,1,4,,"randint [1,4]"
-hidden_size,randint,3,8,,"choice [8,16,32,64,128]"
-dropout,uniform,0,0.5,,"uniform [0,0.50]"
-learning_rate,loguniform,0.0001,0.001,,"loguniform[0.0001,0.001]"
+l2_weight,uniform,1e-5,1e-2,,"loguniform[-5,0]"
+dropout,uniform,0,0.2,,"uniform [0.01,0.1]"
+learning_rate,uniform,1e-3,1e-1,,"uniform[0.0001,0.01]"
+hidden_size,randint,4,8
+num_layers,randint,1,5

@@ -784,6 +784,7 @@ def validate_epoch(
     loss_function: Callable,
     device: str,
     use_composite_loss: bool = False,
+    warmup_timesteps: int = 0,
     verbose: int = 1
 ):
     """
@@ -809,6 +810,9 @@ def validate_epoch(
             
             # ALWAYS compute MSE for validation (ignore training loss type)
             loss = mse_loss(predictions, y_batch)
+            if warmup_timesteps > 0:
+                predictions = predictions[:, warmup_timesteps:, :]
+                y_batch     = y_batch[:, warmup_timesteps:, :]
             
             total_loss += loss.item()
             num_batches += 1
@@ -1289,14 +1293,11 @@ def train_model(
         print("\n" + "-"*80)
         print("STEP 5: Setting up loss function")
         print("-"*80)
-    
-    use_composite_loss = (
-        l2_weight > 0 or 
-        jacobian_weight > 0 or 
-        hidden_derivative_weight > 0
-    )
-    
-    if use_composite_loss:
+    warmup_timesteps =None
+    resolved_warmup = warmup_timesteps if warmup_timesteps is not None else int(0.05 * target_timesteps)
+    use_composite_loss = True  # always CompositeLoss — handles warmup in both regularized and plain paths
+
+    if use_composite_loss and (l2_weight > 0 or jacobian_weight > 0 or hidden_derivative_weight > 0):
         loss_fn = create_loss_function(
             base_loss=base_loss,
             # l2_weight=l2_weight,
@@ -1304,26 +1305,16 @@ def train_model(
             hidden_derivative_weight=hidden_derivative_weight,
             jacobian_every_n_batches=jacobian_every_n_batches,
             hidden_derivative_every_n_batches=hidden_derivative_every_n_batches,
+            warmup_timesteps=resolved_warmup,
             verbose=(verbose >= 1)
         )
     else:
-        if verbose >= 1:
-            print(f"\nLoss Function Configuration:")
-            print(f"  Base loss: {base_loss.upper()} (no regularization)")
-        
-        loss_map = {
-            'mse': nn.MSELoss,
-            'mae': nn.L1Loss,
-            'l1': nn.L1Loss,
-            'smooth_l1': nn.SmoothL1Loss,
-            'huber': nn.HuberLoss
-        }
-        
-        if base_loss.lower() in loss_map:
-            loss_fn = loss_map[base_loss.lower()]()
-        else:
-            raise ValueError(f"Unknown base loss: {base_loss}")
-    
+        loss_fn = create_loss_function(
+            base_loss=base_loss,
+            warmup_timesteps=resolved_warmup,
+            verbose=(verbose >= 1)
+        )
+
     loss_config = {
         'base_loss': base_loss,
         'use_composite_loss': use_composite_loss,
@@ -1331,7 +1322,8 @@ def train_model(
         'jacobian_weight': jacobian_weight,
         'hidden_derivative_weight': hidden_derivative_weight,
         'jacobian_every_n_batches': jacobian_every_n_batches,
-        'hidden_derivative_every_n_batches': hidden_derivative_every_n_batches
+        'hidden_derivative_every_n_batches': hidden_derivative_every_n_batches,
+        'warmup_timesteps': resolved_warmup,
     }
     
     # ========================================================================
@@ -1484,6 +1476,7 @@ def train_model(
                 loss_function=loss_fn,
                 device=device,
                 use_composite_loss=use_composite_loss,
+                warmup_timesteps=resolved_warmup,
                 verbose=verbose
             )
             
@@ -1492,7 +1485,7 @@ def train_model(
             
             # #LOG_PER_EPOCH - Validation loss
             epoch_val_loss = val_loss
-            mlflow.log_metric("Val loss", epoch_train_loss, step = epoch, synchronous=False)
+            mlflow.log_metric("Val loss", epoch_val_loss, step = epoch, synchronous=False)
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
