@@ -1239,8 +1239,13 @@ def train_model(
                 print(f"\nLoading pretrained model from: {load_model_path}")
             
             try:
-                state_dict = torch.load(load_model_path, map_location=device)
-                model.load_state_dict(state_dict, strict=load_model_strict)
+                loaded = torch.load(load_model_path, map_location=device,weights_only=False)
+                if isinstance(loaded, dict):
+                    model.load_state_dict(loaded)
+                else:
+                    model.load_state_dict(loaded.state_dict())
+
+                    model.to(device)
                 
                 if verbose >= 1:
                     print(f"Successfully loaded model weights")

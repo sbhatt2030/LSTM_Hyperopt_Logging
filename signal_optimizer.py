@@ -506,7 +506,7 @@ def optimize_batch(
     init_method:     str,
     device:          str,
     max_deviation:   float = MAX_DEVIATION_MM,
-    verbose:         bool = False
+    verbose:         bool  = False
 ) -> tuple[torch.Tensor, torch.Tensor, list]:
     """
     Run inner optimization loop for a mini-batch of signals.
@@ -537,6 +537,10 @@ def optimize_batch(
         # Projected gradient — clamp z back to feasible set
         with torch.no_grad():
             z.clamp_(-max_deviation, max_deviation)
+            x_star_step   = x_pos + z
+            opt_pred_step = model(build_gru_input(x_star_step))
+            impr = compute_improvement(x_pos, x_star_step, baseline_pred, opt_pred_step, warmup_steps)
+        mlflow.log_metric("step_mean_improvement", impr.mean().item(), step=step, synchronous=False)
 
         step_time = time.perf_counter() - t0
         step_times.append(step_time)
@@ -909,7 +913,7 @@ if __name__ == "__main__":
 
     algo  = OptunaSearch(points_to_evaluate=INITIAL_PARAMS)
     algo = Repeater(algo, repeat=4)
-    algo  = ConcurrencyLimiter(algo, max_concurrent=5)
+    algo  = ConcurrencyLimiter(algo, max_concurrent=4)
 
     tuner = tune.Tuner(
         tune.with_resources(
@@ -922,7 +926,7 @@ if __name__ == "__main__":
                 axis_selection = AXIS_SELECTION,
                 exp_id         = EXP_ID
             ),
-            resources={"gpu": 4, "cpu": 4}
+            resources={"gpu": 1, "cpu": 1}
         ),
         param_space=SEARCH_CONFIG,
         tune_config=tune.TuneConfig(

@@ -1,6 +1,4 @@
 Name,type,1,2,3,info
 l2_weight,uniform,1e-5,1e-2,,"loguniform[-5,0]"
-dropout,uniform,0,0.2,,"uniform [0.01,0.1]"
-learning_rate,uniform,1e-3,1e-1,,"uniform[0.0001,0.01]"
-hidden_size,randint,4,8
-num_layers,randint,1,5
+dropout,uniform,0,0.5,,"uniform [0.01,0.1]"
+learning_rate,uniform,1e-7,1e-3,,"uniform[0.0001,0.01]"
