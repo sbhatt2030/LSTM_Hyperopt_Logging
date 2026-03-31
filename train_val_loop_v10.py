@@ -794,37 +794,26 @@ def validate_epoch(
     This provides a consistent metric for model comparison and early stopping.
     """
     model.eval()
-    
-    total_loss = 0.0
-    num_batches = 0
-    
-    # Always use MSE for validation
-    mse_loss = nn.MSELoss()
-    
+    mse_loss     = nn.MSELoss()
+    batch_losses = []
+
     with torch.no_grad():
         for batch_idx, (X_batch, y_batch) in enumerate(val_loader):
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
-            
             predictions = model(X_batch)
-            
-            # ALWAYS compute MSE for validation (ignore training loss type)
-            loss = mse_loss(predictions, y_batch)
             if warmup_timesteps > 0:
                 predictions = predictions[:, warmup_timesteps:, :]
-                y_batch     = y_batch[:, warmup_timesteps:, :]
-            
-            total_loss += loss.item()
-            num_batches += 1
-            
-            if verbose >= 2 and (batch_idx + 1) % 10 == 0:
-                print(f"    Batch [{batch_idx + 1}/{len(val_loader)}] Loss: {loss.item():.6f}")
-    
-    avg_loss = total_loss / num_batches
-    
+                y_batch     = y_batch[:,     warmup_timesteps:, :]
+            loss = mse_loss(predictions, y_batch)
+            batch_losses.append(loss.item())
+
+    avg_loss = float(np.mean(batch_losses))
+    std_loss = float(np.std(batch_losses, ddof=1)) if len(batch_losses) > 1 else 0.0
+
     if verbose >= 1:
-        print(f"  Val Loss (MSE): {avg_loss:.6f}")
-    return avg_loss
+        print(f"  Val Loss (MSE): {avg_loss:.6f} ± {std_loss:.6f}")
+    return avg_loss, std_loss
 
 # ============================================================================
 # EARLY STOPPING MODULE
@@ -1475,7 +1464,7 @@ def train_model(
         # Validation (always MSE)
         val_loss = None
         if (epoch + 1) % validation_frequency == 0:
-            val_loss = validate_epoch(
+            val_loss, val_loss_std = validate_epoch(
                 model=model,
                 val_loader=val_loader,
                 loss_function=loss_fn,
@@ -1491,9 +1480,11 @@ def train_model(
             # #LOG_PER_EPOCH - Validation loss
             epoch_val_loss = val_loss
             mlflow.log_metric("Val loss", epoch_val_loss, step = epoch, synchronous=False)
+            mlflow.log_metric("val_loss_std", val_loss_std, step=epoch, synchronous=False)
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
+                best_val_std = val_loss_std
                 
                 # Save best model
                 if save_model_path is not None:
@@ -1512,6 +1503,7 @@ def train_model(
             # #LOG_PER_EPOCH - Best validation loss so far
             epoch_best_val_loss = best_val_loss
             mlflow.log_metric("best val loss", epoch_best_val_loss, step = epoch, synchronous=False)
+            mlflow.log_metric("best val std", best_val_std, step = epoch, synchronous=False)
             
             # Early stopping check
             status = early_stopper(val_loss)
