@@ -20,13 +20,16 @@ TRACKING_URI = "http://hurco-lambda.hurco.com:8090"
 # Changing any of these makes historical runs incomparable, so they act as
 # the filter criteria when loading warm-start points from MLflow.
 FIXED_PARAMS = {
-    "data_file_path":           "data/complete_error_prediction_data.npy",
+    "data_file_path":           "/home/bhatts/LSTM_Hyperopt_Logging/data/clean_final.npy",
     "target_timesteps":         8000,
     "downsample_factor":        1,
     "axis_selection":           "x",
     "model_type":               "gru",
     "num_layers":               4,
-    "base_loss":                "mse"
+    "base_loss":                "mse",
+    "max_abs_weight":           0,
+    "jacobian_weight":          0,
+    "hidden_derivative_weight": 0,
 }
 
 # --- Trial params: passed to every trial but NOT used to filter MLflow history.
@@ -41,7 +44,7 @@ TRIAL_PARAMS = {
 # Set LOAD_MODEL_PATH to None to train from scratch.
 # When set, hidden_size is fixed to CHECKPOINT_HIDDEN_SIZE (must match the
 # checkpoint architecture) and is NOT searched.
-LOAD_MODEL_PATH        = "/home/bhatts/LSTM_Hyperopt_Logging/~/mlartifacts/121/models/m-e1f870a8674c4d869d1f2520713c52c1/artifacts/data/model.pth"
+LOAD_MODEL_PATH        = "/home/bhatts/LSTM_Hyperopt_Logging/~/mlartifacts/133/models/m-bb5e6f113e3c4628a89939fa0d4b0bcb/artifacts/data/model.pth"
 LOAD_MODEL_STRICT      = True
 CHECKPOINT_HIDDEN_SIZE = 64   # ignored when LOAD_MODEL_PATH is None
 
@@ -52,9 +55,10 @@ CHECKPOINT_HIDDEN_SIZE = 64   # ignored when LOAD_MODEL_PATH is None
 SEARCH_SPACE = {
     "l2_weight":     tune.loguniform(1e-6, 1e-5),
     "dropout":       tune.uniform(0.1, 0.2),
-    "learning_rate": tune.loguniform(1e-7, 1e-5),
-    "jacobian_weight":tune.loguniform(1e-7, 1e-5),
-    "hidden_derivative_weight": tune.loguniform(1e-7, 1e-5)
+    "learning_rate": tune.loguniform(1e-6, 1e-4),
+    #"jacobian_weight":tune.loguniform(1e-1, 50),
+    #"hidden_derivative_weight": tune.loguniform(1e-2, 5e4),
+    #"max_abs_weight": tune.loguniform(0.1,10)
 
 }
 
@@ -64,15 +68,16 @@ SEARCH_SPACE = {
 INITIAL_POINT = {
     "l2_weight":     5e-6,
     "dropout":       0.15,
-    "learning_rate": 1e-6,
-    "jacobian_weight": 1e-6,
-    "hidden_derivative_weight": 1e-6
+    "learning_rate": 1e-5,
+    #"jacobian_weight": 1,
+    #"hidden_derivative_weight": 1e2,
+    #"max_abs_weight":           2.0
 
 }
 
 # --- Ray Tune settings ---
 NUM_SAMPLES    = 50
-REPEAT         = 3
+REPEAT         = 2
 MAX_CONCURRENT = 5
 
 # ============================================================================

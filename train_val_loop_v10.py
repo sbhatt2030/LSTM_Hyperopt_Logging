@@ -427,7 +427,7 @@ def initialize_model(
 def compute_jacobian_frobenius_penalty(
     model: nn.Module,
     inputs: torch.Tensor,
-    accel_noise_std: float = 1e-4 / 150,
+    accel_noise_std: float = 0.146,
     axis_selection: str = 'x',
     include_velocity: bool = True,
     include_acceleration: bool = True,
@@ -531,6 +531,22 @@ def compute_hidden_derivative_penalty(
     penalty = torch.clamp(penalty, 0.0, max_penalty)
     
     return penalty
+def compute_max_abs_error_loss(
+    predictions: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Max absolute error over time per signal per output, squared,
+    averaged over signals and outputs.
+
+    Shape: predictions/targets (B, T, O)
+    Returns scalar.
+    """
+    abs_err = (predictions - targets).abs()   # (B, T, O)
+    max_err = abs_err.amax(dim=1)             # (B, O) — max over time
+    return max_err.pow(2).mean()              # scalar
+
+
 def extract_hidden_states_lstm(
     model: nn.Module,
     inputs: torch.Tensor,
@@ -593,6 +609,7 @@ class CompositeLoss(nn.Module):
         base_loss: str = 'mse',
         jacobian_weight: float = 0.0,
         hidden_derivative_weight: float = 0.0,
+        max_abs_weight: float = 0.0,
         warmup_timesteps: int = 10,
         jacobian_every_n_batches: int = 1,
         hidden_derivative_every_n_batches: int = 1,
@@ -610,6 +627,7 @@ class CompositeLoss(nn.Module):
         
         self.jacobian_weight = jacobian_weight
         self.hidden_derivative_weight = hidden_derivative_weight
+        self.max_abs_weight = max_abs_weight
         self.warmup_timesteps = warmup_timesteps
         
         # Computation schedules
@@ -631,6 +649,7 @@ class CompositeLoss(nn.Module):
     def needs_input_gradients(self) -> bool:
         """Check if input gradients are needed (only for Jacobian)."""
         return self.jacobian_weight > 0
+
     def forward(
         self,
         predictions: torch.Tensor,
@@ -639,59 +658,78 @@ class CompositeLoss(nn.Module):
         inputs: Optional[torch.Tensor] = None,
         hidden_states: Optional[torch.Tensor] = None,
         batch_idx: int = 0
-    ) -> torch.Tensor:
-        """Compute composite loss."""
-        
+    ) -> tuple:
+        """Compute composite loss. Returns (loss, components_dict)."""
+
         # Discard warmup timesteps
         if self.warmup_timesteps > 0:
             predictions = predictions[:, self.warmup_timesteps:, :]
-            targets = targets[:, self.warmup_timesteps:, :]
+            targets     = targets[:,     self.warmup_timesteps:, :]
             if inputs is not None:
                 inputs = inputs[:, self.warmup_timesteps:, :]
             if hidden_states is not None:
                 hidden_states = hidden_states[:, self.warmup_timesteps:, :]
-        
+
         # Base loss
         base_loss_value = self.base_loss(predictions, targets)
         loss = base_loss_value
-        
+
+        # Track raw penalty values
+        jacobian_penalty_raw     = 0.0
+        hidden_deriv_penalty_raw = 0.0
+        max_abs_penalty_raw      = 0.0
+
         # Jacobian Frobenius norm
         if self.jacobian_weight > 0:
             if inputs is None:
                 raise ValueError("inputs required when jacobian_weight > 0")
-            
             should_compute = (batch_idx % self.jacobian_every_n_batches == 0)
-            
             if should_compute:
-                jacobian_penalty = compute_jacobian_frobenius_penalty(
-                    model, inputs  # â† FIXED: Only 2 arguments now
-                )
+                jacobian_penalty = compute_jacobian_frobenius_penalty(model, inputs)
                 self._cached_jacobian_penalty = jacobian_penalty.item()
             else:
                 jacobian_penalty = self._cached_jacobian_penalty
-            
+            jacobian_penalty_raw = self._cached_jacobian_penalty
             loss = loss + self.jacobian_weight * jacobian_penalty
-        
+
         # Hidden state derivative penalty
         if self.hidden_derivative_weight > 0:
             if hidden_states is not None:
                 should_compute = (batch_idx % self.hidden_derivative_every_n_batches == 0)
-                
                 if should_compute:
                     hidden_penalty = compute_hidden_derivative_penalty(hidden_states)
-                    self._cached_hidden_derivative_penalty = hidden_penalty
+                    self._cached_hidden_derivative_penalty = hidden_penalty.item() if torch.is_tensor(hidden_penalty) else hidden_penalty
                 else:
                     hidden_penalty = self._cached_hidden_derivative_penalty
-                
+                hidden_deriv_penalty_raw = self._cached_hidden_derivative_penalty
                 loss = loss + self.hidden_derivative_weight * hidden_penalty
-        
-        return loss
+
+        # Max absolute error penalty
+        if self.max_abs_weight > 0:
+            max_abs_penalty = compute_max_abs_error_loss(predictions, targets)
+            max_abs_penalty_raw = max_abs_penalty.item()
+            loss = loss + self.max_abs_weight * max_abs_penalty
+
+        components = {
+            'base_loss':            base_loss_value.item(),
+            'jacobian_penalty':     jacobian_penalty_raw,
+            'hidden_deriv_penalty': hidden_deriv_penalty_raw,
+            'max_abs_penalty':      max_abs_penalty_raw,
+            'jacobian_contrib':     self.jacobian_weight          * jacobian_penalty_raw,
+            'hidden_deriv_contrib': self.hidden_derivative_weight * hidden_deriv_penalty_raw,
+            'max_abs_contrib':      self.max_abs_weight           * max_abs_penalty_raw,
+            'total':                loss.item(),
+        }
+
+        return loss, components
+
 def create_loss_function(
     base_loss: str = 'mse',
     jacobian_weight: float = 0.0,
     jacobian_every_n_batches: int = 1,
     hidden_derivative_weight: float = 0.0,
     hidden_derivative_every_n_batches: int = 1,
+    max_abs_weight: float = 0.0,
     warmup_timesteps: int = 0,
     track_l2: bool = True,
     verbose: bool = True
@@ -701,6 +739,7 @@ def create_loss_function(
         base_loss=base_loss,
         jacobian_weight=jacobian_weight,
         hidden_derivative_weight=hidden_derivative_weight,
+        max_abs_weight=max_abs_weight,
         warmup_timesteps=warmup_timesteps,
         jacobian_every_n_batches=jacobian_every_n_batches,
         hidden_derivative_every_n_batches=hidden_derivative_every_n_batches,
@@ -712,6 +751,8 @@ def create_loss_function(
         print(f"  Base loss: {base_loss.upper()}")
         if jacobian_weight > 0 or hidden_derivative_weight > 0:
             print(f"  Regularization: Jacobian={jacobian_weight}, Hidden Derivative={hidden_derivative_weight}")
+        if max_abs_weight > 0:
+            print(f"  Max abs error weight: {max_abs_weight}")
         print(f"  L2 regularization: via optimizer.weight_decay")
         if warmup_timesteps > 0:
             print(f"  Warmup timesteps: {warmup_timesteps} (discarded from loss)")
@@ -731,18 +772,21 @@ def train_epoch(
     use_composite_loss: bool = False,
     verbose: int = 1
 ):
-    """Train model for one epoch."""
+    """Train model for one epoch. Returns (avg_loss, avg_components)."""
     model.train()
     
     total_loss = 0.0
     num_batches = 0
+    # Accumulators for component logging
+    accum = {
+        'base_loss': 0.0, 'jacobian_penalty': 0.0, 'hidden_deriv_penalty': 0.0,
+        'max_abs_penalty': 0.0, 'jacobian_contrib': 0.0,
+        'hidden_deriv_contrib': 0.0, 'max_abs_contrib': 0.0,
+    }
     
     for batch_idx, (X_batch, y_batch) in enumerate(train_loader):
         X_batch = X_batch.to(device)
         y_batch = y_batch.to(device)
-        
-        # if use_composite_loss and loss_function.needs_input_gradients():
-        #     X_batch.requires_grad_(True)
         
         optimizer.zero_grad()
         predictions = model(X_batch)
@@ -754,9 +798,11 @@ def train_epoch(
             hidden_states = None
         
         if use_composite_loss:
-            loss = loss_function(
+            loss, components = loss_function(
                 predictions, y_batch, model, X_batch, hidden_states, batch_idx
             )
+            for k in accum:
+                accum[k] += components.get(k, 0.0)
         else:
             loss = loss_function(predictions, y_batch)
         
@@ -774,10 +820,12 @@ def train_epoch(
             print(f"    Batch [{batch_idx + 1}/{len(train_loader)}] Loss: {loss.item():.6f}")
     
     avg_loss = total_loss / num_batches
+    avg_components = {k: v / num_batches for k, v in accum.items()} if use_composite_loss else {}
+
     if verbose >= 1:
         print(f"  Train Loss: {avg_loss:.6f}")
     
-    return avg_loss
+    return avg_loss, avg_components
 def validate_epoch(
     model: nn.Module,
     val_loader: DataLoader,
@@ -785,35 +833,48 @@ def validate_epoch(
     device: str,
     use_composite_loss: bool = False,
     warmup_timesteps: int = 0,
+    max_abs_weight: float = 0.0,
     verbose: int = 1
 ):
     """
     Validate model for one epoch.
-    
-    IMPORTANT: Validation ALWAYS uses MSE loss, regardless of training loss.
-    This provides a consistent metric for model comparison and early stopping.
+
+    When max_abs_weight=0: returns pure MSE (Stage 1 — unchanged behaviour).
+    When max_abs_weight>0: returns MSE + max_abs_weight * max_abs_error (Stage 2).
+    'best val loss' always refers to this composite so existing tooling is unaffected.
+
+    Returns: (composite, std_mse, avg_mse, avg_max_abs)
     """
     model.eval()
-    mse_loss     = nn.MSELoss()
-    batch_losses = []
+    mse_loss_fn  = nn.MSELoss()
+    mse_losses   = []
+    max_abs_losses = []
 
     with torch.no_grad():
-        for batch_idx, (X_batch, y_batch) in enumerate(val_loader):
+        for X_batch, y_batch in val_loader:
             X_batch = X_batch.to(device)
             y_batch = y_batch.to(device)
             predictions = model(X_batch)
             if warmup_timesteps > 0:
                 predictions = predictions[:, warmup_timesteps:, :]
                 y_batch     = y_batch[:,     warmup_timesteps:, :]
-            loss = mse_loss(predictions, y_batch)
-            batch_losses.append(loss.item())
+            mse_losses.append(mse_loss_fn(predictions, y_batch).item())
+            if max_abs_weight > 0:
+                max_abs_losses.append(compute_max_abs_error_loss(predictions, y_batch).item())
 
-    avg_loss = float(np.mean(batch_losses))
-    std_loss = float(np.std(batch_losses, ddof=1)) if len(batch_losses) > 1 else 0.0
+    avg_mse     = float(np.mean(mse_losses))
+    std_mse     = float(np.std(mse_losses, ddof=1)) if len(mse_losses) > 1 else 0.0
+    avg_max_abs = float(np.mean(max_abs_losses)) if max_abs_losses else 0.0
+    composite   = avg_mse + max_abs_weight * avg_max_abs
 
     if verbose >= 1:
-        print(f"  Val Loss (MSE): {avg_loss:.6f} ± {std_loss:.6f}")
-    return avg_loss, std_loss
+        if max_abs_weight > 0:
+            print(f"  Val MSE: {avg_mse:.6f} ± {std_mse:.6f} | "
+                  f"Val MaxAbs: {avg_max_abs:.6f} | Composite: {composite:.6f}")
+        else:
+            print(f"  Val Loss (MSE): {avg_mse:.6f} ± {std_mse:.6f}")
+
+    return composite, std_mse, avg_mse, avg_max_abs
 
 # ============================================================================
 # EARLY STOPPING MODULE
@@ -864,9 +925,11 @@ def plot_predictions(
     device: str,
     save_dir: str = 'results',
     dataset_name: str = 'train',
-    error_names: List[str] = ['e_scale']
+    error_names: List[str] = ['e_scale'],
+    warmup_timesteps: int = 0,
 ):
-    """Plot predictions: position input, error signals, and deltas only."""
+    """Plot predictions: position input, error signals, and deltas only.
+    All plots and stats are computed over post-warmup timesteps only."""
     model.eval()
     
     save_path = Path(save_dir)
@@ -884,17 +947,22 @@ def plot_predictions(
             X = X.cpu().numpy()
             y_true = y_true.cpu().numpy()
             y_pred = y_pred.squeeze(0).cpu().numpy()
-            
-            position = X[:, 0]
-            delta = y_pred - y_true
+
+            # Slice to post-warmup region
+            w = warmup_timesteps
+            position = X[w:, 0]
+            y_true   = y_true[w:, :]
+            y_pred   = y_pred[w:, :]
+            delta    = y_pred - y_true
             num_outputs = y_true.shape[-1]
 
             n_rows = 2 + num_outputs  # position + one row per output + delta
             fig, axes = plt.subplots(n_rows, 1, figsize=(14, 4 * n_rows))
-            fig.suptitle(f'{dataset_name.capitalize()} Sample {sample_idx} - Predictions vs Actual',
+            fig.suptitle(f'{dataset_name.capitalize()} Sample {sample_idx} - Predictions vs Actual'
+                         + (f' (warmup={w} steps excluded)' if w > 0 else ''),
                         fontsize=16, fontweight='bold')
 
-            timesteps = np.arange(len(position))
+            timesteps = np.arange(w, w + len(position))
 
             # Plot 1: Position Input
             axes[0].plot(timesteps, position, 'b-', linewidth=1.5, label='Position')
@@ -934,15 +1002,15 @@ def plot_predictions(
             delta_ax.grid(True, alpha=0.3)
             delta_ax.legend(loc='upper right')
 
+            # Stats computed over post-warmup region only
             stats_lines = []
             for i in range(num_outputs):
                 label = error_names[i] if i < len(error_names) else f'output_{i}'
-                mae_i = np.mean(np.abs(delta[:, i]))
+                mae_i  = np.mean(np.abs(delta[:, i]))
                 rmse_i = np.sqrt(np.mean(delta[:, i] ** 2))
                 stats_lines.append(f'MAE {label}={mae_i:.6f}  RMSE {label}={rmse_i:.6f}')
             stats_text = '\n'.join(stats_lines)
 
-            
             fig.text(0.99, 0.01, stats_text, ha='right', va='bottom', 
                     fontsize=9, family='monospace',
                     bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
@@ -968,7 +1036,8 @@ def visualize_predictions(
     num_samples: int = 10,
     save_dir: str = 'results',
     random_seed: int = 42,
-    error_names: List[str] = ['e_scale']
+    error_names: List[str] = ['e_scale'],
+    warmup_timesteps: int = 0,
 ):
     """Visualize predictions on both train and validation sets."""
     print("\n" + "="*80)
@@ -996,7 +1065,8 @@ def visualize_predictions(
         device=device,
         save_dir=save_dir,
         dataset_name='train',
-        error_names=error_names
+        error_names=error_names,
+        warmup_timesteps=warmup_timesteps,
     )
     
     plot_predictions(
@@ -1006,7 +1076,8 @@ def visualize_predictions(
         device=device,
         save_dir=save_dir,
         dataset_name='val',
-        error_names=error_names
+        error_names=error_names,
+        warmup_timesteps=warmup_timesteps,
     )
     
     print("\n" + "="*80)
@@ -1046,6 +1117,7 @@ def train_model(
     jacobian_every_n_batches: int = 1,
     hidden_derivative_weight: float = 0.0,
     hidden_derivative_every_n_batches: int = 1,
+    max_abs_weight: float = 0.0,
     
     # Training parameters
     num_epochs: int = 50,
@@ -1291,12 +1363,13 @@ def train_model(
     resolved_warmup = warmup_timesteps if warmup_timesteps is not None else int(0.05 * target_timesteps)
     use_composite_loss = True  # always CompositeLoss — handles warmup in both regularized and plain paths
 
-    if use_composite_loss and (l2_weight > 0 or jacobian_weight > 0 or hidden_derivative_weight > 0):
+    if use_composite_loss and (l2_weight > 0 or jacobian_weight > 0 or hidden_derivative_weight > 0 or max_abs_weight > 0):
         loss_fn = create_loss_function(
             base_loss=base_loss,
             # l2_weight=l2_weight,
             jacobian_weight=jacobian_weight,
             hidden_derivative_weight=hidden_derivative_weight,
+            max_abs_weight=max_abs_weight,
             jacobian_every_n_batches=jacobian_every_n_batches,
             hidden_derivative_every_n_batches=hidden_derivative_every_n_batches,
             warmup_timesteps=resolved_warmup,
@@ -1315,6 +1388,7 @@ def train_model(
         'l2_weight': l2_weight,
         'jacobian_weight': jacobian_weight,
         'hidden_derivative_weight': hidden_derivative_weight,
+        'max_abs_weight': max_abs_weight,
         'jacobian_every_n_batches': jacobian_every_n_batches,
         'hidden_derivative_every_n_batches': hidden_derivative_every_n_batches,
         'warmup_timesteps': resolved_warmup,
@@ -1443,7 +1517,7 @@ def train_model(
             print("-" * 40)
         
         # Training
-        train_loss = train_epoch(
+        train_loss, train_components = train_epoch(
             model=model,
             train_loader=train_loader,
             loss_function=loss_fn,
@@ -1457,20 +1531,29 @@ def train_model(
         if return_history:
             history['train_loss'].append(train_loss)
         
-        # #LOG_PER_EPOCH - Training loss
-        mlflow.log_metric("Train loss", train_loss, step = epoch, synchronous=False)
+        # #LOG_PER_EPOCH - Training loss and components
+        mlflow.log_metric("Train loss", train_loss, step=epoch, synchronous=False)
+        if train_components:
+            mlflow.log_metric("train_base_loss",            train_components['base_loss'],            step=epoch, synchronous=False)
+            mlflow.log_metric("train_jacobian_penalty",     train_components['jacobian_penalty'],     step=epoch, synchronous=False)
+            mlflow.log_metric("train_hidden_deriv_penalty", train_components['hidden_deriv_penalty'], step=epoch, synchronous=False)
+            mlflow.log_metric("train_max_abs_penalty",      train_components['max_abs_penalty'],      step=epoch, synchronous=False)
+            mlflow.log_metric("train_jacobian_contrib",     train_components['jacobian_contrib'],     step=epoch, synchronous=False)
+            mlflow.log_metric("train_hidden_deriv_contrib", train_components['hidden_deriv_contrib'], step=epoch, synchronous=False)
+            mlflow.log_metric("train_max_abs_contrib",      train_components['max_abs_contrib'],      step=epoch, synchronous=False)
         epoch_train_loss = train_loss
         
-        # Validation (always MSE)
+        # Validation
         val_loss = None
         if (epoch + 1) % validation_frequency == 0:
-            val_loss, val_loss_std = validate_epoch(
+            val_loss, val_loss_std, val_mse, val_max_abs = validate_epoch(
                 model=model,
                 val_loader=val_loader,
                 loss_function=loss_fn,
                 device=device,
                 use_composite_loss=use_composite_loss,
                 warmup_timesteps=resolved_warmup,
+                max_abs_weight=max_abs_weight,
                 verbose=verbose
             )
             
@@ -1479,8 +1562,10 @@ def train_model(
             
             # #LOG_PER_EPOCH - Validation loss
             epoch_val_loss = val_loss
-            mlflow.log_metric("Val loss", epoch_val_loss, step = epoch, synchronous=False)
-            mlflow.log_metric("val_loss_std", val_loss_std, step=epoch, synchronous=False)
+            mlflow.log_metric("Val loss",        epoch_val_loss, step=epoch, synchronous=False)
+            mlflow.log_metric("val_loss_std",    val_loss_std,   step=epoch, synchronous=False)
+            mlflow.log_metric("val_mse",         val_mse,        step=epoch, synchronous=False)
+            mlflow.log_metric("val_max_abs",     val_max_abs,    step=epoch, synchronous=False)
             
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -1599,7 +1684,8 @@ def train_model(
             num_samples=num_plot_samples,
             save_dir=plot_save_dir,
             random_seed=seed_used,
-            error_names=error_names
+            error_names=error_names,
+            warmup_timesteps=resolved_warmup,
         )
     mlflow.end_run()
     return model, history, seed_used
