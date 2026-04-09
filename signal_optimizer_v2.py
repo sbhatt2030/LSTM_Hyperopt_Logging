@@ -71,7 +71,7 @@ from train_val_loop_v10 import TimeSeriesDataset, SequenceModel, AXIS_COLUMNS
 
 # Physical constraint in mm — single source of truth.
 # Converted to normalized units once per trial: MAX_DEVIATION_MM / POS_STD[axis]
-MAX_DEVIATION_MM  = 0.5
+MAX_DEVIATION_MM  = 100
 
 # Fraction of timesteps excluded from loss and metric (LSTM warmup)
 WARMUP_FRAC       = 0.05     # 5% = 400 steps out of 8000
@@ -434,10 +434,13 @@ def compute_loss(
             + lambda_smooth * smooth_loss)
 
     components = {
-        'fidelity': fidelity_loss.item(),
-        'disp':     disp_loss.item(),
-        'smooth':   smooth_loss.item(),
-        'total':    loss.item(),
+        'fidelity':         fidelity_loss.item(),
+        'disp':             disp_loss.item(),
+        'smooth':           smooth_loss.item(),
+        'total':            loss.item(),
+        'contrib_fidelity': (lambda_fidelity * fidelity_loss).item(),
+        'contrib_disp':     (lambda_disp     * disp_loss).item(),
+        'contrib_smooth':   (lambda_smooth   * smooth_loss).item(),
     }
     return loss, components
 
@@ -536,18 +539,19 @@ def step_batch(
     lambda_disp:              float,
     lambda_smooth:            float,
     max_deviation_normalized: float,
-) -> tuple[float, float]:
+) -> tuple[float, dict, float]:
     """
     Run one gradient step on delta_a for a single mini-batch.
 
     Returns:
-        impr:      mean improvement ratio after this step
-        step_time: wall time in seconds
+        impr:       mean improvement ratio after this step
+        components: loss breakdown dict (raw terms + weighted contributions)
+        step_time:  wall time in seconds
     """
     t0 = time.perf_counter()
 
     optimizer.zero_grad()
-    loss, _ = compute_loss(
+    loss, components = compute_loss(
         X_full, delta_a, baseline_pred, model,
         warmup_steps, lambda_fidelity, lambda_disp, lambda_smooth,
         max_deviation_normalized,
@@ -559,7 +563,7 @@ def step_batch(
         X_full, delta_a, baseline_pred, model,
         warmup_steps, max_deviation_normalized,
     )
-    return impr.mean().item(), time.perf_counter() - t0
+    return impr.mean().item(), components, time.perf_counter() - t0
 
 
 # ============================================================================
@@ -567,24 +571,27 @@ def step_batch(
 # ============================================================================
 
 def plot_optimization_results(
-    x_pos:          np.ndarray,   # (T,) commanded position, normalized
-    x_init:         np.ndarray,   # (T,) position at initialization, normalized
-    x_star:         np.ndarray,   # (T,) optimized position, normalized
-    baseline_pred:  np.ndarray,   # (T,) f_LSTM(x,v,a), normalized e_scale
-    opt_pred:       np.ndarray,   # (T,) f_LSTM(x*,v*,a*), normalized e_scale
+    x_pos:          np.ndarray,
+    x_init:         np.ndarray,
+    x_star:         np.ndarray,
+    baseline_pred:  np.ndarray,
+    opt_pred:       np.ndarray,
+    delta_a:        np.ndarray,   # (T,) optimized accel perturbation, normalized
     sample_idx:     int,
     save_dir:       str,
-    pos_std_mm:     float,        # POS_STD[axis] — converts normalized pos deviation -> mm
-    e_scale_std_mm: float,        # E_SCALE_STD[axis] — converts normalized e_scale -> mm
+    pos_std_mm:     float,
+    e_scale_std_mm: float,
+    accel_std:      float,        # ACCEL_STD[axis] — converts normalized accel -> mm/s^2
     warmup_steps:   int,
     mlflow_run:     bool = True,
 ):
     """
-    3-subplot figure. All inputs in normalized units; physical conversions here.
+    4-subplot figure. All inputs in normalized units; physical conversions here.
 
     Subplot 1: Commanded, initialized, optimized position (normalized)
     Subplot 2: Position deviations (x_init - x, x* - x) in mm with +-limit lines
     Subplot 3: Predicted e_scale baseline vs optimized in mm
+    Subplot 4: Optimized delta_a in mm/s^2
 
     Stats annotation: RMSE in um and max deviations in mm.
     """
@@ -592,13 +599,14 @@ def plot_optimization_results(
     t      = np.arange(T)
     warmup = warmup_steps
 
-    # Denormalize to physical units for plots 2 and 3
+    # Denormalize to physical units
     init_dev_mm      = (x_init - x_pos) * pos_std_mm
     opt_dev_mm       = (x_star - x_pos) * pos_std_mm
     baseline_pred_mm = baseline_pred * e_scale_std_mm
     opt_pred_mm      = opt_pred      * e_scale_std_mm
+    delta_a_physical = delta_a       * accel_std        # mm/s^2
 
-    fig, axes = plt.subplots(3, 1, figsize=(14, 12))
+    fig, axes = plt.subplots(4, 1, figsize=(14, 16))
     fig.suptitle(f'Signal Optimization — Sample {sample_idx}', fontsize=14, fontweight='bold')
 
     # ---- Subplot 1: Trajectories (normalized position) ----
@@ -634,6 +642,15 @@ def plot_optimization_results(
     axes[2].legend(loc='upper right', fontsize=9)
     axes[2].grid(True, alpha=0.3)
 
+    # ---- Subplot 4: delta_a in mm/s^2 ----
+    axes[3].plot(t, delta_a_physical, 'm-', lw=1.0, label='δa (optimized)', alpha=0.8)
+    axes[3].axhline(0, color='k', lw=0.6, ls='--', alpha=0.4)
+    axes[3].axvspan(0, warmup, alpha=0.08, color='gray')
+    axes[3].set_ylabel('δa (mm/s²)', fontweight='bold')
+    axes[3].set_title('Optimized Acceleration Perturbation')
+    axes[3].legend(loc='upper right', fontsize=9)
+    axes[3].grid(True, alpha=0.3)
+
     # Stats annotation (post-warmup only, physical units)
     wb            = baseline_pred_mm[warmup:]
     wo            = opt_pred_mm[warmup:]
@@ -648,7 +665,7 @@ def plot_optimization_results(
              f'Improvement: {impr_pct:.1f}%  |  '
              f'Max opt dev: {max_opt_dev:.4f} mm  |  '
              f'Max init dev: {max_init_dev:.4f} mm')
-    axes[2].set_xlabel(f'Timestep\n{stats}', fontsize=8)
+    axes[3].set_xlabel(f'Timestep\n{stats}', fontsize=8)
 
     plt.tight_layout()
 
@@ -801,11 +818,12 @@ def objective(
         all_step_times = []
 
         for step in range(n_iterations):
-            step_imprs = []
-            step_times = []
+            step_imprs      = []
+            step_times      = []
+            step_components = []
 
             for state in batch_states:
-                impr, t = step_batch(
+                impr, components, t = step_batch(
                     X_full                   = state['X_full'],
                     delta_a                  = state['delta_a'],
                     baseline_pred            = state['baseline_pred'],
@@ -819,12 +837,20 @@ def objective(
                 )
                 step_imprs.append(impr)
                 step_times.append(t)
+                step_components.append(components)
 
             all_step_times.extend(step_times)
             mean_step_impr = float(np.mean(step_imprs))
             # step+1 so curve runs: 0 (init), 1, 2, ..., n_iterations
             mlflow.log_metric('step_mean_improvement', mean_step_impr,
                               step=step + 1, synchronous=False)
+            for key in step_components[0]:
+                mlflow.log_metric(
+                    f'loss_{key}',
+                    float(np.mean([c[key] for c in step_components])),
+                    step=step + 1,
+                    synchronous=False,
+                )
 
             if step % 20 == 0 or step == n_iterations - 1:
                 print(f"  Step {step+1:4d}/{n_iterations} | "
@@ -836,6 +862,7 @@ def objective(
         all_X_star       = []   # (N, T, 3) corrected trajectories
         all_X_init       = []   # (N, T, 3) initialized trajectories
         all_opt_pred     = []   # (N, T, 1) predicted error on x*
+        all_delta_a      = []   # (N, T, 1) optimized acceleration perturbation
 
         for state in batch_states:
             with torch.no_grad():
@@ -850,11 +877,13 @@ def objective(
             all_X_star.append(X_star_b.cpu())
             all_X_init.append(state['X_init'].cpu())
             all_opt_pred.append(opt_pred_b.cpu())
+            all_delta_a.append(state['delta_a'].detach().cpu())
 
         all_improvements = torch.cat(all_improvements, dim=0)    # (N,)
         all_X_star       = torch.cat(all_X_star,       dim=0)    # (N, T, 3)
         all_X_init       = torch.cat(all_X_init,       dim=0)    # (N, T, 3)
         all_opt_pred     = torch.cat(all_opt_pred,      dim=0)   # (N, T, 1)
+        all_delta_a      = torch.cat(all_delta_a,       dim=0)   # (N, T, 1)
 
         mean_improvement = all_improvements.mean().item()
         std_improvement  = all_improvements.std().item()
@@ -890,10 +919,12 @@ def objective(
                 x_star         = all_X_star[pi, :, 0].numpy(),
                 baseline_pred  = baseline_all[pi, :, 0].numpy(),
                 opt_pred       = all_opt_pred[pi, :, 0].numpy(),
+                delta_a        = all_delta_a[pi, :, 0].numpy(),
                 sample_idx     = int(sample_idxs[pi]),
                 save_dir       = plot_dir,
                 pos_std_mm     = POS_STD[axis_key],
                 e_scale_std_mm = E_SCALE_STD[axis_key],
+                accel_std      = ACCEL_STD[axis_key],
                 warmup_steps   = warmup_steps,
                 mlflow_run     = True,
             )
@@ -924,7 +955,7 @@ SEARCH_CONFIG = {
     'lambda_disp':     tune.loguniform(1e6,  1e7),
     'lambda_smooth':   tune.loguniform(1e0, 1e5),
     'inner_lr':        tune.loguniform(1e-7, 1e-5),
-    'n_iterations':    tune.randint(1, 11),
+    'n_iterations':    tune.randint(100, 201),
     'init_method':     tune.choice(['inverted_error', 'gaussian']),
 }
 
@@ -933,7 +964,7 @@ INITIAL_PARAMS = [{
     'lambda_disp':     1e6,
     'lambda_smooth':   1e3,
     'inner_lr':        1e-7,
-    'n_iterations':    1,
+    'n_iterations':    100,
     'init_method':     'inverted_error',
 }]
 

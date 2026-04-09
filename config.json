@@ -17,7 +17,7 @@
   },
   
   "training_settings": {
-    "num_epochs": 10,
+    "num_epochs": 200,
     "early_stopping_patience": 10,
     "early_stopping_min_delta": 0.0001,
     "validation_frequency": 1,

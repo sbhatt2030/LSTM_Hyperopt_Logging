@@ -27,9 +27,9 @@ FIXED_PARAMS = {
     "model_type":               "gru",
     "num_layers":               4,
     "base_loss":                "mse",
-    "max_abs_weight":           0,
-    "jacobian_weight":          0,
-    "hidden_derivative_weight": 0,
+    "max_abs_weight":           1,
+    "jacobian_weight":          18.55961201319177,
+    "hidden_derivative_weight": 22971.9626260835,
 }
 
 # --- Trial params: passed to every trial but NOT used to filter MLflow history.
@@ -54,8 +54,8 @@ CHECKPOINT_HIDDEN_SIZE = 64   # ignored when LOAD_MODEL_PATH is None
 # Remove hidden_size when warm-starting (architecture is locked to checkpoint).
 SEARCH_SPACE = {
     "l2_weight":     tune.loguniform(1e-6, 1e-5),
-    "dropout":       tune.uniform(0.1, 0.2),
-    "learning_rate": tune.loguniform(1e-6, 1e-4),
+    "dropout":       tune.uniform(0, 0.2),
+    "learning_rate": tune.loguniform(1e-6, 1e-5),
     #"jacobian_weight":tune.loguniform(1e-1, 50),
     #"hidden_derivative_weight": tune.loguniform(1e-2, 5e4),
     #"max_abs_weight": tune.loguniform(0.1,10)
@@ -68,7 +68,7 @@ SEARCH_SPACE = {
 INITIAL_POINT = {
     "l2_weight":     5e-6,
     "dropout":       0.15,
-    "learning_rate": 1e-5,
+    "learning_rate": 1e-6,
     #"jacobian_weight": 1,
     #"hidden_derivative_weight": 1e2,
     #"max_abs_weight":           2.0
