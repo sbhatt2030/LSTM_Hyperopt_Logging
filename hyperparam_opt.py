@@ -79,6 +79,7 @@ INITIAL_POINT = {
 NUM_SAMPLES    = 50
 REPEAT         = 2
 MAX_CONCURRENT = 5
+PIPELINE = 'compensation' 
 
 # ============================================================================
 # INTERNALS — no need to edit below this line
@@ -139,7 +140,7 @@ def _within_bounds(point: dict, bounds: dict) -> bool:
 
 # ── Objective ─────────────────────────────────────────────────────────────────
 
-def objective(hyperopt_params, exp_id: int):
+def objective(hyperopt_params, exp_id: int, pipeline: str):
     """Ray Tune objective — called once per trial."""
     searched = {k: v for k, v in hyperopt_params.items() if k != "__trial_index__"}
     resolved = _resolve_search_params(searched)
@@ -155,7 +156,7 @@ def objective(hyperopt_params, exp_id: int):
         "save_model_path": f"models/exp_{hyperopt_params['__trial_index__']}",
     }
 
-    final_val_loss = run_experiment("experiment.csv", "config.json", -1, extra_configs)
+    final_val_loss = run_experiment("experiment.csv", "config.json", -1, extra_configs, pipeline=pipeline)
     print(f"loss: {final_val_loss}")
     tune.report({"best val loss": final_val_loss})
 
@@ -277,7 +278,7 @@ def main(exp_id: int):
     # 4. Launch
     tuner = tune.Tuner(
         tune.with_resources(
-            tune.with_parameters(objective, exp_id=exp_id),
+            tune.with_parameters(objective, exp_id=exp_id, pipeline=PIPELINE),
             resources={"gpu": 1, "cpu": 1},
         ),
         param_space=SEARCH_SPACE,

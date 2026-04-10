@@ -9,9 +9,17 @@ import json
 import pandas as pd
 import numpy as np
 from pathlib import Path
-from train_val_loop_v10 import train_model
 import mlflow
 import time
+
+def _get_train_fn(pipeline: str):
+    if pipeline == 'prediction':
+        from train_val_loop_v10 import train_model
+    elif pipeline == 'compensation':
+        from train_val_loop_comp import train_model
+    else:
+        raise ValueError(f"Unknown pipeline: '{pipeline}'. Must be 'prediction' or 'compensation'.")
+    return train_model
 
 def load_config(config_path='config.json'):
     """Load shared configuration from JSON file."""
@@ -66,7 +74,7 @@ def merge_configs(base_config, experiment_row):
     return config
 
 
-def run_experiment(csv_path: str, config_path: str, experiment_idx: int, extra_configs:dict = {}) -> float:
+def run_experiment(csv_path: str, config_path: str, experiment_idx: int, extra_configs: dict = {}, pipeline: str = 'prediction') -> float:
     """
     Simple entry point for running a single experiment.
     
@@ -117,6 +125,7 @@ def run_experiment(csv_path: str, config_path: str, experiment_idx: int, extra_c
         config[key] = value
     try:
         # Train model
+        train_model = _get_train_fn(pipeline)
         model, history, seed = train_model(**config)
         
         # Get final validation loss
