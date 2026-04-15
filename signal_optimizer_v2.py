@@ -71,7 +71,7 @@ from train_val_loop_v10 import TimeSeriesDataset, SequenceModel, AXIS_COLUMNS
 
 # Physical constraint in mm — single source of truth.
 # Converted to normalized units once per trial: MAX_DEVIATION_MM / POS_STD[axis]
-MAX_DEVIATION_MM  = 100
+MAX_DEVIATION_MM  = 0.5
 
 # Fraction of timesteps excluded from loss and metric (LSTM warmup)
 WARMUP_FRAC       = 0.05     # 5% = 400 steps out of 8000
@@ -387,21 +387,24 @@ def compute_loss(
     lambda_disp:              float,
     lambda_smooth:            float,
     max_deviation_normalized: float,
+    pos_to_escale:            float,          # POS_STD[axis] / E_SCALE_STD[axis]
 ) -> tuple[torch.Tensor, dict]:
     """
     Three-term loss over the current delta_a.
 
-    L_fidelity = (1/T') * ||delta_x[warmup:] + e(x*, v*, a*)[warmup:]||_2^2
-        The sum delta_x + e is how far the realized position deviates from the
-        commanded trajectory: machine executes x + delta_x with predicted error
-        e, so realized = x + delta_x + e. Minimizing ||delta_x + e|| drives
-        realized toward x. Collapsing error and position penalty into one term
-        avoids the conflicting gradients that arise from treating them separately.
+    L_fidelity = (1/T') * ||delta_x_escale[warmup:] + e(x*, v*, a*)[warmup:]||_2^2
+        delta_x is in pos_norm units; e is in e_scale_norm units. They are
+        converted to the same space (e_scale_norm) via pos_to_escale before
+        summing: delta_x_escale = delta_x * (pos_std / e_scale_std).
+        The sum represents realized tracking error in e_scale units:
+        machine executes x + delta_x with predicted error e, so realized
+        deviation from commanded = delta_x + e (both in e_scale_norm units).
 
     L_disp = (delta_x[-1])^2
         Squared final position drift — a single scalar, not a norm over time.
         lambda_disp >> lambda_fidelity to make this effectively binding and
         prevent the optimizer from exploiting one-directional cumulative drift.
+        Kept in pos_norm units (independent of e_scale normalization).
 
     L_smooth = (1/T') * ||diff(delta_a)[warmup:]||_2^2
         Penalizes jerk in delta_a. Keeps LSTM inputs in-distribution by
@@ -415,12 +418,13 @@ def compute_loss(
     e_opt     = model(gru_input)   # (B, T, 1) predicted error on corrected trajectory
 
     # Post-warmup slices
-    dx = delta_x[:, warmup_steps:, :]   # (B, T', 1)
-    e  = e_opt[:,   warmup_steps:, :]   # (B, T', 1)
+    dx = delta_x[:, warmup_steps:, :]   # (B, T', 1) pos_norm units
+    e  = e_opt[:,   warmup_steps:, :]   # (B, T', 1) e_scale_norm units
     da = delta_a[:, warmup_steps:, :]   # (B, T', 1)
 
-    # Fidelity: ||delta_x + e||^2 / T'
-    fidelity_loss = (dx + e).pow(2).mean()
+    # Fidelity: convert dx to e_scale_norm units before summing with e
+    dx_escale     = dx * pos_to_escale
+    fidelity_loss = (dx_escale + e).pow(2).mean()
 
     # Displacement: squared final delta_x value (scalar per signal, averaged over batch)
     disp_loss = delta_x[:, -1, :].pow(2).mean()
@@ -456,11 +460,16 @@ def compute_improvement(
     model:                    nn.Module,
     warmup_steps:             int,
     max_deviation_normalized: float,
+    pos_to_escale:            float,          # POS_STD[axis] / E_SCALE_STD[axis]
 ) -> torch.Tensor:
     """
     Per-signal improvement ratio (HPO objective, maximized).
 
-    improvement = ||x + e_original||_2 / ||x + delta_x + e||_2
+    improvement = ||x_escale + e_original||_2 / ||x_escale + dx_escale + e||_2
+
+    x and dx are in pos_norm units; e0 and e1 are in e_scale_norm units.
+    All terms are converted to e_scale_norm units via pos_to_escale before
+    summing so the metric is dimensionally coherent.
 
     x is included so the metric penalizes both large uncorrected errors
     and large corrections that don't meaningfully help.
@@ -477,13 +486,14 @@ def compute_improvement(
         gru_input = build_corrected_input(X_full, delta_x, delta_v, delta_a_proj)
         e_opt     = model(gru_input)   # (B, T, 1)
 
-    x   = X_full[:, warmup_steps:, 0]         # (B, T')
-    e0  = baseline_pred[:, warmup_steps:, 0]  # (B, T')
-    dx  = delta_x[:, warmup_steps:, 0]        # (B, T')
-    e1  = e_opt[:, warmup_steps:, 0]          # (B, T')
+    # Convert pos_norm quantities to e_scale_norm units before combining with e
+    x_escale  = X_full[:, warmup_steps:, 0] * pos_to_escale   # (B, T')
+    dx_escale = delta_x[:, warmup_steps:, 0] * pos_to_escale  # (B, T')
+    e0        = baseline_pred[:, warmup_steps:, 0]             # (B, T') already e_scale_norm
+    e1        = e_opt[:, warmup_steps:, 0]                     # (B, T') already e_scale_norm
 
-    original_norm  = (x + e0).pow(2).mean(dim=1).sqrt()       # (B,)
-    corrected_norm = (x + dx + e1).pow(2).mean(dim=1).sqrt()  # (B,)
+    original_norm  = (x_escale + e0).pow(2).mean(dim=1).sqrt()          # (B,)
+    corrected_norm = (x_escale + dx_escale + e1).pow(2).mean(dim=1).sqrt()  # (B,)
 
     denom = corrected_norm.clamp(min=1e-10)
     return original_norm / denom   # (B,)
@@ -503,6 +513,7 @@ def init_batch(
     device:                   str,
     max_deviation_normalized: float,
     e_scale_to_accel_ratio:   float,
+    pos_to_escale:            float,          # POS_STD[axis] / E_SCALE_STD[axis]
 ) -> tuple[torch.Tensor, torch.Tensor, torch.optim.Optimizer, float]:
     """
     Initialise delta_a and Adam optimizer for one mini-batch.
@@ -523,6 +534,7 @@ def init_batch(
         X_init    = build_corrected_input(X_full, dx, dv, da_proj)
         init_impr = compute_improvement(
             X_full, delta_a, baseline_pred, model, warmup_steps, max_deviation_normalized,
+            pos_to_escale,
         )
     optimizer = torch.optim.Adam([delta_a], lr=inner_lr)
     return delta_a, X_init.detach(), optimizer, init_impr.mean().item()
@@ -539,31 +551,31 @@ def step_batch(
     lambda_disp:              float,
     lambda_smooth:            float,
     max_deviation_normalized: float,
-) -> tuple[float, dict, float]:
+    pos_to_escale:            float,          # POS_STD[axis] / E_SCALE_STD[axis]
+) -> tuple[float, float]:
     """
     Run one gradient step on delta_a for a single mini-batch.
 
     Returns:
-        impr:       mean improvement ratio after this step
-        components: loss breakdown dict (raw terms + weighted contributions)
-        step_time:  wall time in seconds
+        impr:      mean improvement ratio after this step
+        step_time: wall time in seconds
     """
     t0 = time.perf_counter()
 
     optimizer.zero_grad()
-    loss, components = compute_loss(
+    loss, _ = compute_loss(
         X_full, delta_a, baseline_pred, model,
         warmup_steps, lambda_fidelity, lambda_disp, lambda_smooth,
-        max_deviation_normalized,
+        max_deviation_normalized, pos_to_escale,
     )
     loss.backward()
     optimizer.step()
 
     impr = compute_improvement(
         X_full, delta_a, baseline_pred, model,
-        warmup_steps, max_deviation_normalized,
+        warmup_steps, max_deviation_normalized, pos_to_escale,
     )
-    return impr.mean().item(), components, time.perf_counter() - t0
+    return impr.mean().item(), time.perf_counter() - t0
 
 
 # ============================================================================
@@ -571,27 +583,24 @@ def step_batch(
 # ============================================================================
 
 def plot_optimization_results(
-    x_pos:          np.ndarray,
-    x_init:         np.ndarray,
-    x_star:         np.ndarray,
-    baseline_pred:  np.ndarray,
-    opt_pred:       np.ndarray,
-    delta_a:        np.ndarray,   # (T,) optimized accel perturbation, normalized
+    x_pos:          np.ndarray,   # (T,) commanded position, normalized
+    x_init:         np.ndarray,   # (T,) position at initialization, normalized
+    x_star:         np.ndarray,   # (T,) optimized position, normalized
+    baseline_pred:  np.ndarray,   # (T,) f_LSTM(x,v,a), normalized e_scale
+    opt_pred:       np.ndarray,   # (T,) f_LSTM(x*,v*,a*), normalized e_scale
     sample_idx:     int,
     save_dir:       str,
-    pos_std_mm:     float,
-    e_scale_std_mm: float,
-    accel_std:      float,        # ACCEL_STD[axis] — converts normalized accel -> mm/s^2
+    pos_std_mm:     float,        # POS_STD[axis] — converts normalized pos deviation -> mm
+    e_scale_std_mm: float,        # E_SCALE_STD[axis] — converts normalized e_scale -> mm
     warmup_steps:   int,
     mlflow_run:     bool = True,
 ):
     """
-    4-subplot figure. All inputs in normalized units; physical conversions here.
+    3-subplot figure. All inputs in normalized units; physical conversions here.
 
     Subplot 1: Commanded, initialized, optimized position (normalized)
     Subplot 2: Position deviations (x_init - x, x* - x) in mm with +-limit lines
     Subplot 3: Predicted e_scale baseline vs optimized in mm
-    Subplot 4: Optimized delta_a in mm/s^2
 
     Stats annotation: RMSE in um and max deviations in mm.
     """
@@ -599,7 +608,7 @@ def plot_optimization_results(
     t      = np.arange(T)
     warmup = warmup_steps
 
-    # Denormalize to physical units
+    # Denormalize to physical units for plots 2 and 3
     init_dev_mm      = (x_init - x_pos) * pos_std_mm
     opt_dev_mm       = (x_star - x_pos) * pos_std_mm
     baseline_pred_mm = baseline_pred * e_scale_std_mm
@@ -722,6 +731,7 @@ def objective(
     axis_key                 = axis_selection if axis_selection != 'all' else 'x'
     max_deviation_normalized = MAX_DEVIATION_MM / POS_STD[axis_key]
     e_scale_to_accel_ratio   = E_SCALE_STD[axis_key] / ACCEL_STD[axis_key]
+    pos_to_escale            = POS_STD[axis_key] / E_SCALE_STD[axis_key]
     e_scale_std              = E_SCALE_STD[axis_key]
 
     # ---- Unpack hyperparameters ----
@@ -749,6 +759,7 @@ def objective(
         mlflow.log_param('max_deviation_mm',         MAX_DEVIATION_MM)
         mlflow.log_param('max_deviation_normalized', max_deviation_normalized)
         mlflow.log_param('pos_std_mm',               POS_STD[axis_key])
+        mlflow.log_param('pos_to_escale',            pos_to_escale)
         mlflow.log_param('axis_selection',           axis_selection)
         mlflow.log_param('trial_idx',                trial_idx)
         mlflow.log_param('warmup_steps',             warmup_steps)
@@ -798,6 +809,7 @@ def objective(
                 device                   = device,
                 max_deviation_normalized = max_deviation_normalized,
                 e_scale_to_accel_ratio   = e_scale_to_accel_ratio,
+                pos_to_escale            = pos_to_escale,
             )
             batch_states.append({
                 'X_full':        xb,
@@ -834,6 +846,7 @@ def objective(
                     lambda_disp              = lambda_disp,
                     lambda_smooth            = lambda_smooth,
                     max_deviation_normalized = max_deviation_normalized,
+                    pos_to_escale            = pos_to_escale,
                 )
                 step_imprs.append(impr)
                 step_times.append(t)
@@ -871,7 +884,7 @@ def objective(
                 opt_pred_b      = model(X_star_b)
                 impr            = compute_improvement(
                     state['X_full'], state['delta_a'], state['baseline_pred'],
-                    model, warmup_steps, max_deviation_normalized,
+                    model, warmup_steps, max_deviation_normalized, pos_to_escale,
                 )
             all_improvements.append(impr.cpu())
             all_X_star.append(X_star_b.cpu())
@@ -955,7 +968,7 @@ SEARCH_CONFIG = {
     'lambda_disp':     tune.loguniform(1e6,  1e7),
     'lambda_smooth':   tune.loguniform(1e0, 1e5),
     'inner_lr':        tune.loguniform(1e-7, 1e-5),
-    'n_iterations':    tune.randint(100, 201),
+    'n_iterations':    tune.randint(1, 11),
     'init_method':     tune.choice(['inverted_error', 'gaussian']),
 }
 
@@ -964,7 +977,7 @@ INITIAL_PARAMS = [{
     'lambda_disp':     1e6,
     'lambda_smooth':   1e3,
     'inner_lr':        1e-7,
-    'n_iterations':    100,
+    'n_iterations':    1,
     'init_method':     'inverted_error',
 }]
 

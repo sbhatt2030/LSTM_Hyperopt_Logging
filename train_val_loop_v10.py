@@ -1100,6 +1100,7 @@ def train_model(
     min_position_change: float = 0.0001,
     train_val_split: float = 8/9,
     random_seed: int = 0,
+    run_purpose: str = "prediction",
     
     # Model parameters
     model_type: str = 'lstm',
@@ -1166,7 +1167,7 @@ def train_model(
     ####MAKE MLFLOW RUN
     mlflow.set_tracking_uri(tracking_uri)
     run = mlflow.start_run(experiment_id=str(mlflow_experiment_id), log_system_metrics=True)
-    
+    mlflow.set_tag("run_purpose", run_purpose)
     if verbose >= 1:
         print("="*80)
         print("TRAINING PIPELINE")

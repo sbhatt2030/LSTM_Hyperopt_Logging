@@ -20,22 +20,21 @@ TRACKING_URI = "http://hurco-lambda.hurco.com:8090"
 # Changing any of these makes historical runs incomparable, so they act as
 # the filter criteria when loading warm-start points from MLflow.
 FIXED_PARAMS = {
-    "data_file_path":           "/home/bhatts/LSTM_Hyperopt_Logging/data/clean_final.npy",
+    "data_file_path":           "data/permutation_dataset_1_5.npy",
     "target_timesteps":         8000,
     "downsample_factor":        1,
     "axis_selection":           "x",
-    "model_type":               "gru",
-    "num_layers":               4,
     "base_loss":                "mse",
-    "max_abs_weight":           1,
-    "jacobian_weight":          18.55961201319177,
-    "hidden_derivative_weight": 22971.9626260835,
+    "max_abs_weight":           0,
+    "jacobian_weight":          0,
+    "hidden_derivative_weight": 0,
+    "run_purpose": "compensation"
 }
 
 # --- Trial params: passed to every trial but NOT used to filter MLflow history.
 # These are housekeeping / infrastructure settings that don't affect the loss.
 TRIAL_PARAMS = {
-    "batch_size": 128,
+    "batch_size": 64,
     "device":     "cuda",
     "verbose":    0,
 }
@@ -44,7 +43,7 @@ TRIAL_PARAMS = {
 # Set LOAD_MODEL_PATH to None to train from scratch.
 # When set, hidden_size is fixed to CHECKPOINT_HIDDEN_SIZE (must match the
 # checkpoint architecture) and is NOT searched.
-LOAD_MODEL_PATH        = "/home/bhatts/LSTM_Hyperopt_Logging/~/mlartifacts/133/models/m-bb5e6f113e3c4628a89939fa0d4b0bcb/artifacts/data/model.pth"
+LOAD_MODEL_PATH        = None
 LOAD_MODEL_STRICT      = True
 CHECKPOINT_HIDDEN_SIZE = 64   # ignored when LOAD_MODEL_PATH is None
 
@@ -53,9 +52,12 @@ CHECKPOINT_HIDDEN_SIZE = 64   # ignored when LOAD_MODEL_PATH is None
 # e.g. randint(4, 8) searches over {16, 32, 64, 128}.
 # Remove hidden_size when warm-starting (architecture is locked to checkpoint).
 SEARCH_SPACE = {
-    "l2_weight":     tune.loguniform(1e-6, 1e-5),
-    "dropout":       tune.uniform(0, 0.2),
-    "learning_rate": tune.loguniform(1e-6, 1e-5),
+    "l2_weight":     tune.loguniform(1e-6, 1e-2),
+    "dropout":       tune.uniform(0, 0.5),
+    "learning_rate": tune.loguniform(1e-6, 1e-2),
+    "num_layers":    tune.randint(1,5),
+    "hidden_size":   tune.randint(1,7),
+    "model_type":    tune.choice(["gru","lstm"])
     #"jacobian_weight":tune.loguniform(1e-1, 50),
     #"hidden_derivative_weight": tune.loguniform(1e-2, 5e4),
     #"max_abs_weight": tune.loguniform(0.1,10)
@@ -69,17 +71,16 @@ INITIAL_POINT = {
     "l2_weight":     5e-6,
     "dropout":       0.15,
     "learning_rate": 1e-6,
-    #"jacobian_weight": 1,
-    #"hidden_derivative_weight": 1e2,
-    #"max_abs_weight":           2.0
-
+    "num_layers":    2,       # actual int, not exponent
+    "hidden_size":   6,       # exponent → 2**6 = 64
+    "model_type":    "gru",
 }
 
 # --- Ray Tune settings ---
-NUM_SAMPLES    = 50
-REPEAT         = 2
+NUM_SAMPLES    = 200
+REPEAT         = 3
 MAX_CONCURRENT = 5
-PIPELINE = 'compensation' 
+PIPELINE = FIXED_PARAMS["run_purpose"]
 
 # ============================================================================
 # INTERNALS — no need to edit below this line
