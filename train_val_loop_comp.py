@@ -92,7 +92,7 @@ class CompDataset(Dataset):
         target_timesteps: int,
         axis_selection: str = 'x',
         downsample_factor: int = 1,
-        reverse_time: bool = False,
+        reverse_time: bool = True,
         max_samples: Optional[int] = None,
         random_seed: int = 0,
         dtype: torch.dtype = torch.float32,
@@ -493,7 +493,7 @@ def visualize_predictions(
     num_samples:  int  = 10,
     save_dir:     str  = 'results_comp',
     random_seed:  int  = 42,
-    reverse_time: bool = False,
+    reverse_time: bool = True,
 ):
     np.random.seed(random_seed)
 
@@ -660,7 +660,7 @@ def train_model(
     verbose:        int  = 1,
     return_history: bool = True,
     save_model_path: Optional[str] = None,
-    save_best_only:  bool = True,
+    save_best:  bool = True,
 
     # ── Visualization ────────────────────────────────────────────────────────
     generate_plots:  bool = True,
@@ -903,7 +903,7 @@ def train_model(
                 best_val_std   = val_loss_std
                 best_model_state = {k: v.clone() for k, v in model.state_dict().items()}
 
-                if save_model_path is not None and save_best_only:
+                if save_model_path is not None and save_best:
                     Path(save_model_path).parent.mkdir(parents=True, exist_ok=True)
                     torch.save(best_model_state, save_model_path)
                     if verbose >= 1:
@@ -924,10 +924,10 @@ def train_model(
         if verbose >= 1:
             print(f"  Epoch time: {epoch_time:.2f}s")
 
-    # Restore best weights before logging to MLflow
-    if best_model_state is not None:
+    # Restore best weights only when save_best_only=True; otherwise keep last epoch state
+    if save_best and best_model_state is not None:
         model.load_state_dict(best_model_state)
-    mlflow.pytorch.log_model(model, name="model_best")
+    mlflow.pytorch.log_model(model, name="model_best" if save_best else "model_last")
 
     # ── STEP 9: Summary ──────────────────────────────────────────────────────
     total_time          = time.time() - start_time
@@ -945,7 +945,7 @@ def train_model(
         print("=" * 80)
 
     # ── STEP 10: Save final model if needed ──────────────────────────────────
-    if save_model_path is not None and not save_best_only:
+    if save_model_path is not None and not save_best:
         final_path = Path(save_model_path)
         final_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(model, str(final_path.parent / f"{final_path.stem}_final{final_path.suffix}"))

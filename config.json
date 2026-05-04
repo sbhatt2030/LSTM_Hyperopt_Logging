@@ -17,14 +17,15 @@
   },
   
   "training_settings": {
-    "num_epochs": 200,
-    "early_stopping_patience": 100,
-    "early_stopping_min_delta": 0.0001,
+    "num_epochs": 500,
+    "early_stopping_patience": 1000,
+    "early_stopping_min_delta": 0.000001,
     "validation_frequency": 1,
     "optimizer_type": "adam",
     "optimizer_kwargs": null,
     "gradient_clip_value": null,
-    "bidirectional": false
+    "bidirectional": true,
+    "save_best": false
   },
   
   "dataloader_settings": {

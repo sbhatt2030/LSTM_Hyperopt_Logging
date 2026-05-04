@@ -15,8 +15,10 @@ import time
 def _get_train_fn(pipeline: str):
     if pipeline == 'prediction':
         from train_val_loop_v10 import train_model
-    elif pipeline == 'compensation':
+    elif pipeline == 'compensation_old':
         from train_val_loop_comp import train_model
+    elif pipeline == "compensation_new":
+        from train_val_loop_comp_v2 import train_model
     else:
         raise ValueError(f"Unknown pipeline: '{pipeline}'. Must be 'prediction' or 'compensation'.")
     return train_model
