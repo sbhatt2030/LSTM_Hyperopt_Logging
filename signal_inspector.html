@@ -1,0 +1,1146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Signal Inspector — CNC Trajectory</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&family=Syne:wght@400;600;800&display=swap');
+
+  :root {
+    --bg:       #0a0c0f;
+    --panel:    #0f1217;
+    --border:   #1e2530;
+    --accent:   #00d4ff;
+    --accent2:  #ff6b35;
+    --accent3:  #7fff6e;
+    --accent4:  #f5c842;
+    --muted:    #3a4555;
+    --text:     #c8d8e8;
+    --text-dim: #5a6a7a;
+    --danger:   #ff4455;
+    --grid-ln:  rgba(30,37,48,0.8);
+
+    --pos-col:   #00d4ff;
+    --vel-col:   #7fff6e;
+    --accel-col: #f5c842;
+    --err-col:   #ff6b35;
+    --delta-col: #bb88ff;
+    --sum-col:   #ff4455;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+    flex-shrink: 0;
+  }
+
+  header h1 {
+    font-family: 'Syne', sans-serif;
+    font-size: 15px;
+    font-weight: 800;
+    color: var(--accent);
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+  }
+
+  .header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    flex: 1;
+  }
+
+  .btn {
+    background: var(--border);
+    border: 1px solid var(--muted);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 5px 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { border-color: var(--accent); color: var(--accent); background: rgba(0,212,255,0.08); }
+  .btn.primary:hover { background: rgba(0,212,255,0.18); }
+
+  label.file-btn {
+    background: var(--border);
+    border: 1px solid var(--muted);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 5px 12px;
+    cursor: pointer;
+    transition: all 0.15s;
+    white-space: nowrap;
+  }
+  label.file-btn:hover { border-color: var(--accent); color: var(--accent); }
+  input[type=file] { display: none; }
+
+  .sep { width: 1px; height: 20px; background: var(--border); }
+
+  select, input[type=number], input[type=text] {
+    background: var(--bg);
+    border: 1px solid var(--muted);
+    color: var(--text);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    padding: 4px 8px;
+  }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+
+  .status-chip {
+    font-size: 10px;
+    padding: 3px 8px;
+    border: 1px solid;
+    background: transparent;
+  }
+  .status-chip.ok   { border-color: var(--accent3); color: var(--accent3); }
+  .status-chip.warn { border-color: var(--accent4); color: var(--accent4); }
+  .status-chip.err  { border-color: var(--danger);  color: var(--danger);  }
+  .status-chip.dim  { border-color: var(--muted);   color: var(--text-dim);}
+
+  /* ── Layout ── */
+  .main {
+    display: flex;
+    flex: 1;
+    overflow: hidden;
+  }
+
+  /* ── Sidebar ── */
+  .sidebar {
+    width: 200px;
+    flex-shrink: 0;
+    border-right: 1px solid var(--border);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+  }
+
+  .sidebar-section {
+    border-bottom: 1px solid var(--border);
+    padding: 10px 12px;
+  }
+
+  .sidebar-section h3 {
+    font-family: 'Syne', sans-serif;
+    font-size: 9px;
+    font-weight: 600;
+    color: var(--text-dim);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+  }
+
+  .ctrl-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 6px;
+    gap: 6px;
+  }
+  .ctrl-row label { color: var(--text-dim); font-size: 10px; white-space: nowrap; }
+  .ctrl-row input, .ctrl-row select { flex: 1; min-width: 0; }
+
+  /* Radio view toggle */
+  .radio-group { display: flex; flex-direction: column; gap: 5px; }
+  .radio-item {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    cursor: pointer;
+    padding: 4px 6px;
+    border: 1px solid transparent;
+    transition: all 0.12s;
+  }
+  .radio-item:hover { border-color: var(--muted); }
+  .radio-item.active { border-color: var(--accent); background: rgba(0,212,255,0.06); }
+  .radio-item input[type=radio] { display: none; }
+  .radio-dot {
+    width: 8px; height: 8px;
+    border: 1px solid var(--muted);
+    border-radius: 50%;
+    flex-shrink: 0;
+    transition: all 0.12s;
+  }
+  .radio-item.active .radio-dot {
+    border-color: var(--accent);
+    background: var(--accent);
+    box-shadow: 0 0 6px var(--accent);
+  }
+  .radio-label { font-size: 10px; color: var(--text-dim); }
+  .radio-item.active .radio-label { color: var(--text); }
+
+  /* Legend */
+  .legend-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+  }
+  .legend-dot { width: 8px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+  .legend-label { font-size: 10px; color: var(--text-dim); }
+
+  /* Stats */
+  .stat-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 3px;
+    font-size: 10px;
+  }
+  .stat-row span:first-child { color: var(--text-dim); }
+  .stat-row span:last-child  { color: var(--text); font-weight: 500; }
+
+  .improvement-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 6px 8px;
+    text-align: center;
+    border: 1px solid;
+    margin-top: 6px;
+    font-family: 'Syne', sans-serif;
+  }
+  .improvement-badge.pos { border-color: var(--accent3); color: var(--accent3); background: rgba(127,255,110,0.06); }
+  .improvement-badge.neg { border-color: var(--danger);  color: var(--danger);  background: rgba(255,68,85,0.06); }
+
+  /* ── Canvas area ── */
+  .canvas-area {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .channels {
+    flex: 1;
+    display: grid;
+    grid-template-rows: repeat(4, 1fr);
+    overflow: hidden;
+  }
+
+  .channel {
+    position: relative;
+    border-bottom: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .channel:last-child { border-bottom: none; }
+
+  .channel-label {
+    position: absolute;
+    top: 6px;
+    left: 10px;
+    font-family: 'Syne', sans-serif;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    pointer-events: none;
+    z-index: 2;
+  }
+
+  .channel-stats {
+    position: absolute;
+    top: 6px;
+    right: 10px;
+    font-size: 9px;
+    color: var(--text-dim);
+    pointer-events: none;
+    z-index: 2;
+    text-align: right;
+  }
+
+  canvas.signal-canvas {
+    width: 100%;
+    height: 100%;
+    cursor: crosshair;
+    display: block;
+  }
+
+  /* ── Timeline / scrubber ── */
+  .timeline {
+    height: 28px;
+    flex-shrink: 0;
+    background: var(--panel);
+    border-top: 1px solid var(--border);
+    position: relative;
+    overflow: hidden;
+  }
+  .timeline canvas { width: 100%; height: 100%; display: block; }
+
+  /* ── Overlay / instructions ── */
+  .overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(10,12,15,0.92);
+    z-index: 10;
+  }
+  .overlay h2 {
+    font-family: 'Syne', sans-serif;
+    font-size: 18px;
+    font-weight: 800;
+    color: var(--accent);
+    letter-spacing: 0.06em;
+  }
+  .overlay p { color: var(--text-dim); font-size: 11px; line-height: 1.8; text-align: center; }
+  .overlay .drop-zone {
+    border: 1px dashed var(--muted);
+    padding: 24px 40px;
+    text-align: center;
+    transition: all 0.2s;
+  }
+  .overlay .drop-zone.dragover { border-color: var(--accent); background: rgba(0,212,255,0.05); }
+
+  /* ── Scrub line ── */
+  #cursor-line {
+    position: absolute;
+    top: 0; bottom: 0;
+    width: 1px;
+    background: rgba(0,212,255,0.4);
+    pointer-events: none;
+    display: none;
+    z-index: 5;
+  }
+  #cursor-readout {
+    position: absolute;
+    top: 4px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    padding: 2px 6px;
+    font-size: 10px;
+    color: var(--accent);
+    pointer-events: none;
+    display: none;
+    z-index: 6;
+    white-space: nowrap;
+  }
+
+  /* Edit mode indicator */
+  .edit-indicator {
+    position: absolute;
+    bottom: 8px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(245,200,66,0.12);
+    border: 1px solid var(--accent4);
+    color: var(--accent4);
+    font-size: 10px;
+    padding: 2px 10px;
+    pointer-events: none;
+    z-index: 5;
+    display: none;
+  }
+
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <h1>◈ SIGNAL INSPECTOR</h1>
+  <div class="header-controls">
+    <label class="file-btn" title="Load .npy file">
+      ▸ LOAD .NPY
+      <input type="file" id="file-input" accept=".npy">
+    </label>
+    <div class="sep"></div>
+    <label style="color:var(--text-dim);font-size:10px;">AXIS</label>
+    <select id="axis-sel" style="width:50px">
+      <option value="0">X</option>
+      <option value="1">Y</option>
+      <option value="2">Z</option>
+    </select>
+    <div class="sep"></div>
+    <label style="color:var(--text-dim);font-size:10px;">IDX</label>
+    <input type="number" id="sample-idx" value="0" min="0" style="width:60px">
+    <button class="btn" id="load-idx-btn">LOAD</button>
+    <button class="btn" id="rand-btn">RANDOM</button>
+    <div class="sep"></div>
+    <button class="btn" id="reset-btn">RESET δ</button>
+    <button class="btn" id="smooth-btn">SMOOTH δa</button>
+    <div class="sep"></div>
+    <span id="status-chip" class="status-chip dim">NO DATA</span>
+    <span id="n-samples-chip" class="status-chip dim" style="display:none"></span>
+  </div>
+</header>
+
+<div class="main">
+  <!-- Sidebar -->
+  <div class="sidebar">
+
+    <!-- View mode -->
+    <div class="sidebar-section">
+      <h3>VIEW MODE</h3>
+      <div class="radio-group" id="view-radio">
+        <div class="radio-item active" data-view="commanded">
+          <input type="radio" name="view" value="commanded" checked>
+          <div class="radio-dot"></div>
+          <span class="radio-label">Commanded</span>
+        </div>
+        <div class="radio-item" data-view="delta">
+          <input type="radio" name="view" value="delta">
+          <div class="radio-dot"></div>
+          <span class="radio-label">Delta (δ)</span>
+        </div>
+        <div class="radio-item" data-view="sum">
+          <input type="radio" name="view" value="sum">
+          <div class="radio-dot"></div>
+          <span class="radio-label">Commanded + δ</span>
+        </div>
+        <div class="radio-item" data-view="error">
+          <input type="radio" name="view" value="error">
+          <div class="radio-dot"></div>
+          <span class="radio-label">Error (e_scale)</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Edit channel -->
+    <div class="sidebar-section">
+      <h3>EDIT CHANNEL</h3>
+      <div class="radio-group" id="edit-radio">
+        <div class="radio-item active" data-edit="accel">
+          <input type="radio" name="edit" value="accel" checked>
+          <div class="radio-dot"></div>
+          <span class="radio-label">δ Accel (drag)</span>
+        </div>
+        <div class="radio-item" data-edit="vel">
+          <input type="radio" name="edit" value="vel">
+          <div class="radio-dot"></div>
+          <span class="radio-label">δ Vel (drag)</span>
+        </div>
+        <div class="radio-item" data-edit="pos">
+          <input type="radio" name="edit" value="pos">
+          <div class="radio-dot"></div>
+          <span class="radio-label">δ Pos (drag)</span>
+        </div>
+      </div>
+      <p style="color:var(--text-dim);font-size:9px;margin-top:8px;line-height:1.6;">
+        Drag up/down on any signal canvas to modify the selected δ channel. Kinematics propagate automatically via cumsum.
+      </p>
+    </div>
+
+    <!-- Brush -->
+    <div class="sidebar-section">
+      <h3>BRUSH</h3>
+      <div class="ctrl-row">
+        <label>Width</label>
+        <input type="range" id="brush-width" min="1" max="500" value="50" style="flex:1;accent-color:var(--accent)">
+      </div>
+      <div class="ctrl-row">
+        <label>Strength</label>
+        <input type="range" id="brush-strength" min="1" max="100" value="20" style="flex:1;accent-color:var(--accent)">
+      </div>
+      <div class="ctrl-row">
+        <label>Falloff</label>
+        <select id="brush-falloff">
+          <option value="gaussian">Gaussian</option>
+          <option value="linear">Linear</option>
+          <option value="flat">Flat</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Legend -->
+    <div class="sidebar-section">
+      <h3>LEGEND</h3>
+      <div class="legend-row"><div class="legend-dot" style="background:var(--pos-col);height:2px;width:16px;"></div><span class="legend-label">Position</span></div>
+      <div class="legend-row"><div class="legend-dot" style="background:var(--vel-col);height:2px;width:16px;"></div><span class="legend-label">Velocity</span></div>
+      <div class="legend-row"><div class="legend-dot" style="background:var(--accel-col);height:2px;width:16px;"></div><span class="legend-label">Accel</span></div>
+      <div class="legend-row"><div class="legend-dot" style="background:var(--err-col);height:2px;width:16px;"></div><span class="legend-label">e_scale (error)</span></div>
+      <div class="legend-row"><div class="legend-dot" style="background:var(--delta-col);height:2px;width:16px;border-top:1px dashed var(--delta-col);height:0"></div><span class="legend-label">δ (perturbation)</span></div>
+    </div>
+
+    <!-- Stats -->
+    <div class="sidebar-section" id="stats-section">
+      <h3>STATS</h3>
+      <div class="stat-row"><span>e_scale RMSE</span><span id="stat-rmse">—</span></div>
+      <div class="stat-row"><span>e_scale max</span><span id="stat-max">—</span></div>
+      <div class="stat-row"><span>δpos max</span><span id="stat-dpos">—</span></div>
+      <div class="stat-row"><span>δvel max</span><span id="stat-dvel">—</span></div>
+      <div class="stat-row"><span>δaccel max</span><span id="stat-daccel">—</span></div>
+      <div class="stat-row"><span>T</span><span id="stat-T">—</span></div>
+      <div class="stat-row"><span>sample</span><span id="stat-sample">—</span></div>
+      <div id="improvement-badge" class="improvement-badge pos" style="display:none"></div>
+    </div>
+
+  </div>
+
+  <!-- Canvas area -->
+  <div class="canvas-area" id="canvas-area">
+    <!-- Overlay -->
+    <div class="overlay" id="overlay">
+      <div class="drop-zone" id="drop-zone">
+        <h2>◈ SIGNAL INSPECTOR</h2>
+        <p>Load a <strong style="color:var(--accent)">.npy</strong> file (shape N × T × 12)<br>
+           or drag & drop it here.</p>
+        <p style="margin-top:12px;color:var(--muted)">Columns 0–2: pos · 3–5: vel · 6–8: accel · 9–11: e_scale</p>
+        <button class="btn primary" style="margin-top:16px" onclick="document.getElementById('file-input').click()">▸ BROWSE FILE</button>
+      </div>
+    </div>
+
+    <!-- 4 channel rows -->
+    <div class="channels" id="channels">
+      <div class="channel" id="ch-pos">
+        <div class="channel-label" style="color:var(--pos-col)">POSITION</div>
+        <div class="channel-stats" id="stats-pos"></div>
+        <canvas class="signal-canvas" id="cv-pos"></canvas>
+      </div>
+      <div class="channel" id="ch-vel">
+        <div class="channel-label" style="color:var(--vel-col)">VELOCITY</div>
+        <div class="channel-stats" id="stats-vel"></div>
+        <canvas class="signal-canvas" id="cv-vel"></canvas>
+      </div>
+      <div class="channel" id="ch-accel">
+        <div class="channel-label" style="color:var(--accel-col)">ACCELERATION</div>
+        <div class="channel-stats" id="stats-accel"></div>
+        <canvas class="signal-canvas" id="cv-accel"></canvas>
+      </div>
+      <div class="channel" id="ch-err">
+        <div class="channel-label" style="color:var(--err-col)">E_SCALE (ERROR)</div>
+        <div class="channel-stats" id="stats-err"></div>
+        <canvas class="signal-canvas" id="cv-err"></canvas>
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="timeline">
+      <canvas id="cv-timeline"></canvas>
+    </div>
+
+    <!-- Cursor line (global) -->
+    <div id="cursor-line"></div>
+    <div id="cursor-readout"></div>
+    <div class="edit-indicator" id="edit-indicator">✎ DRAG TO EDIT</div>
+  </div>
+</div>
+
+<script>
+/* ─────────────────────────────────────────────────────────────────────────
+   NPY PARSER (handles little-endian float32/float64, C-order)
+───────────────────────────────────────────────────────────────────────── */
+function parseNpy(buffer) {
+  const u8 = new Uint8Array(buffer);
+  // Magic
+  if (u8[0] !== 0x93 || String.fromCharCode(u8[1],u8[2],u8[3],u8[4],u8[5]) !== 'NUMPY')
+    throw new Error('Not a .npy file');
+  const major = u8[6];
+  let headerLen, headerBytes;
+  if (major === 1) {
+    headerLen = u8[8] | (u8[9] << 8);
+    headerBytes = 10;
+  } else {
+    headerLen = u8[8] | (u8[9]<<8) | (u8[10]<<16) | (u8[11]<<24);
+    headerBytes = 12;
+  }
+  const headerStr = new TextDecoder().decode(u8.slice(headerBytes, headerBytes + headerLen));
+  // Parse shape
+  const shapeMatch = headerStr.match(/'shape'\s*:\s*\(([^)]+)\)/);
+  if (!shapeMatch) throw new Error('Cannot parse shape');
+  const shape = shapeMatch[1].split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+  // Parse dtype
+  const dtypeMatch = headerStr.match(/'descr'\s*:\s*'([^']+)'/);
+  if (!dtypeMatch) throw new Error('Cannot parse dtype');
+  const dtype = dtypeMatch[1];
+  const isF32 = dtype.includes('f4') || dtype.includes('f<4');
+  const isF64 = dtype.includes('f8') || dtype.includes('f<8');
+  const dataOffset = headerBytes + headerLen;
+  const dataBuffer = buffer.slice(dataOffset);
+  let arr;
+  if (isF32 || dtype === '<f4' || dtype === '|f4') {
+    arr = new Float32Array(dataBuffer);
+  } else if (isF64 || dtype === '<f8') {
+    const f64 = new Float64Array(dataBuffer);
+    arr = new Float32Array(f64.length);
+    for (let i = 0; i < f64.length; i++) arr[i] = f64[i];
+  } else {
+    // Try float32 as fallback
+    arr = new Float32Array(dataBuffer);
+  }
+  return { shape, data: arr };
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   STATE
+───────────────────────────────────────────────────────────────────────── */
+let npyData = null;    // { shape, data }
+let N = 0, T = 0;
+let axis = 0;
+let currentIdx = 0;
+
+// Raw signals for current sample (Float32Array length T)
+let sig_pos = null, sig_vel = null, sig_accel = null, sig_err = null;
+
+// Delta signals (initialized to zeros)
+let delta_a = null;   // editable base
+let delta_v = null;   // = cumsum(delta_a)
+let delta_x = null;   // = cumsum(delta_v)
+
+let viewMode = 'commanded';   // commanded | delta | sum | error
+let editChannel = 'accel';    // accel | vel | pos
+
+// Drag state
+let isDragging = false;
+let dragCanvas = null;
+let dragLastX = -1;
+let dragLastY = -1;
+let dragCenterY = 0;  // canvas center Y when drag started
+
+/* ─────────────────────────────────────────────────────────────────────────
+   UI REFS
+───────────────────────────────────────────────────────────────────────── */
+const fileInput    = document.getElementById('file-input');
+const axisSel      = document.getElementById('axis-sel');
+const sampleIdxEl  = document.getElementById('sample-idx');
+const loadIdxBtn   = document.getElementById('load-idx-btn');
+const randBtn      = document.getElementById('rand-btn');
+const resetBtn     = document.getElementById('reset-btn');
+const smoothBtn    = document.getElementById('smooth-btn');
+const statusChip   = document.getElementById('status-chip');
+const nSamplesChip = document.getElementById('n-samples-chip');
+const overlay      = document.getElementById('overlay');
+const dropZone     = document.getElementById('drop-zone');
+const editIndicator= document.getElementById('edit-indicator');
+const cursorLine   = document.getElementById('cursor-line');
+const cursorReadout= document.getElementById('cursor-readout');
+
+const cvPos    = document.getElementById('cv-pos');
+const cvVel    = document.getElementById('cv-vel');
+const cvAccel  = document.getElementById('cv-accel');
+const cvErr    = document.getElementById('cv-err');
+const cvTL     = document.getElementById('cv-timeline');
+const allCanvases = [cvPos, cvVel, cvAccel, cvErr];
+
+/* ─────────────────────────────────────────────────────────────────────────
+   KINEMATIC PROPAGATION
+───────────────────────────────────────────────────────────────────────── */
+function recomputeFromDeltaA() {
+  delta_v = cumsum(delta_a);
+  delta_x = cumsum(delta_v);
+  // Zero-mean constraints (match signal_optimizer design)
+  const ma = mean(delta_a); for (let i=0;i<T;i++) delta_a[i] -= ma;
+  const mv = mean(delta_v); for (let i=0;i<T;i++) delta_v[i] -= mv;
+  // Recompute after zero-mean correction
+  delta_v = cumsum(delta_a);
+  delta_x = cumsum(delta_v);
+}
+
+function recomputeFromDeltaV() {
+  // delta_v is set; back-derive delta_a, then forward-derive delta_x
+  for (let i=T-1;i>0;i--) delta_a[i] = delta_v[i] - delta_v[i-1];
+  delta_a[0] = delta_v[0];
+  delta_x = cumsum(delta_v);
+}
+
+function recomputeFromDeltaX() {
+  // delta_x is set; back-derive delta_v, then back-derive delta_a
+  for (let i=T-1;i>0;i--) delta_v[i] = delta_x[i] - delta_x[i-1];
+  delta_v[0] = delta_x[0];
+  for (let i=T-1;i>0;i--) delta_a[i] = delta_v[i] - delta_v[i-1];
+  delta_a[0] = delta_v[0];
+}
+
+function cumsum(arr) {
+  const out = new Float32Array(arr.length);
+  let s = 0;
+  for (let i=0;i<arr.length;i++) { s += arr[i]; out[i] = s; }
+  return out;
+}
+
+function mean(arr) {
+  let s = 0; for (let i=0;i<arr.length;i++) s+=arr[i]; return s/arr.length;
+}
+
+function rmse(arr) {
+  let s = 0; for (let i=0;i<arr.length;i++) s+=arr[i]*arr[i]; return Math.sqrt(s/arr.length);
+}
+
+function maxAbs(arr) {
+  let m = 0; for (let i=0;i<arr.length;i++) m = Math.max(m,Math.abs(arr[i])); return m;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   SAMPLE EXTRACTION
+───────────────────────────────────────────────────────────────────────── */
+function loadSample(idx) {
+  if (!npyData) return;
+  const { shape, data } = npyData;
+  // shape: [N, T, 12]
+  const ax = parseInt(axisSel.value);
+  axis = ax;
+  currentIdx = idx;
+  T = shape[1];
+
+  const base = idx * T * 12;
+  sig_pos   = new Float32Array(T);
+  sig_vel   = new Float32Array(T);
+  sig_accel = new Float32Array(T);
+  sig_err   = new Float32Array(T);
+
+  for (let t=0;t<T;t++) {
+    const row = base + t*12;
+    sig_pos[t]   = data[row + ax];
+    sig_vel[t]   = data[row + 3 + ax];
+    sig_accel[t] = data[row + 6 + ax];
+    sig_err[t]   = data[row + 9 + ax];
+  }
+
+  // Reset deltas
+  delta_a = new Float32Array(T);
+  delta_v = new Float32Array(T);
+  delta_x = new Float32Array(T);
+
+  sampleIdxEl.value = idx;
+  updateStats();
+  renderAll();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   DRAWING
+───────────────────────────────────────────────────────────────────────── */
+const COLORS = {
+  pos:   '#00d4ff',
+  vel:   '#7fff6e',
+  accel: '#f5c842',
+  err:   '#ff6b35',
+  delta: '#bb88ff',
+  sum:   '#ff4455',
+  zero:  'rgba(255,255,255,0.08)',
+};
+
+function resizeCanvas(cv) {
+  const rect = cv.parentElement.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(rect.width*dpr) || cv.height !== Math.round(rect.height*dpr)) {
+    cv.width  = Math.round(rect.width  * dpr);
+    cv.height = Math.round(rect.height * dpr);
+    cv.style.width  = rect.width  + 'px';
+    cv.style.height = rect.height + 'px';
+  }
+}
+
+function drawChannel(cv, signals, colors, label_el) {
+  resizeCanvas(cv);
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.width, H = cv.height;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+
+  // Background grid
+  ctx.strokeStyle = 'rgba(30,37,48,0.7)';
+  ctx.lineWidth = 1;
+  const nH = 5;
+  for (let i=1;i<nH;i++) {
+    const y = Math.round(H * i / nH) + 0.5;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  }
+
+  if (!signals || signals.length === 0) return;
+
+  // Compute global min/max across all signals to share axis
+  let gmin = Infinity, gmax = -Infinity;
+  for (const s of signals) {
+    for (let i=0;i<s.data.length;i++) {
+      if (s.data[i] < gmin) gmin = s.data[i];
+      if (s.data[i] > gmax) gmax = s.data[i];
+    }
+  }
+  if (gmin === gmax) { gmin -= 1; gmax += 1; }
+  const pad = (gmax - gmin) * 0.08;
+  const lo = gmin - pad, hi = gmax + pad;
+  const range = hi - lo;
+
+  // Zero line
+  const zy = H - ((0 - lo) / range) * H;
+  ctx.strokeStyle = COLORS.zero;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3,4]);
+  ctx.beginPath(); ctx.moveTo(0, zy); ctx.lineTo(W, zy); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw each signal
+  for (const sig of signals) {
+    const { data, color, dashed } = sig;
+    const n = data.length;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5 * dpr;
+    if (dashed) ctx.setLineDash([4*dpr, 3*dpr]);
+    else ctx.setLineDash([]);
+
+    ctx.beginPath();
+    for (let i=0;i<n;i++) {
+      const x = (i / (n-1)) * W;
+      const y = H - ((data[i] - lo) / range) * H;
+      i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
+    }
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+
+  // Range label
+  if (label_el) {
+    label_el.textContent = `[${gmin.toFixed(3)}, ${gmax.toFixed(3)}]`;
+  }
+
+  return { lo, hi, range };
+}
+
+function getSignalsForChannel(ch) {
+  // ch: 'pos' | 'vel' | 'accel' | 'err'
+  const raw = { pos: sig_pos, vel: sig_vel, accel: sig_accel, err: sig_err }[ch];
+  const d   = { pos: delta_x, vel: delta_v, accel: delta_a, err: null }[ch];
+  const col = { pos: COLORS.pos, vel: COLORS.vel, accel: COLORS.accel, err: COLORS.err }[ch];
+
+  if (ch === 'err') {
+    // Error channel: always show raw + cleaned/modified
+    const out = [{ data: raw, color: COLORS.err, dashed: false }];
+    // Show error shifted by delta_x: e_scale after applying correction conceptually
+    const corrected = new Float32Array(T);
+    for (let i=0;i<T;i++) corrected[i] = raw[i] + delta_x[i];
+    if (viewMode === 'sum' || viewMode === 'delta') {
+      out.push({ data: corrected, color: COLORS.sum, dashed: true });
+    }
+    return out;
+  }
+
+  const signals = [];
+  if (viewMode === 'commanded') {
+    signals.push({ data: raw, color: col, dashed: false });
+  } else if (viewMode === 'delta') {
+    signals.push({ data: d, color: COLORS.delta, dashed: false });
+  } else if (viewMode === 'sum') {
+    signals.push({ data: raw, color: col, dashed: false });
+    const sum = new Float32Array(T);
+    for (let i=0;i<T;i++) sum[i] = raw[i] + d[i];
+    signals.push({ data: sum, color: COLORS.sum, dashed: true });
+  } else if (viewMode === 'error') {
+    // Show only error channel prominently; other channels show commanded dimly
+    signals.push({ data: raw, color: col + '55', dashed: false });
+  }
+  return signals;
+}
+
+function renderAll() {
+  if (!sig_pos) return;
+  drawChannel(cvPos,   getSignalsForChannel('pos'),   COLORS.pos,   document.getElementById('stats-pos'));
+  drawChannel(cvVel,   getSignalsForChannel('vel'),   COLORS.vel,   document.getElementById('stats-vel'));
+  drawChannel(cvAccel, getSignalsForChannel('accel'), COLORS.accel, document.getElementById('stats-accel'));
+  drawChannel(cvErr,   getSignalsForChannel('err'),   COLORS.err,   document.getElementById('stats-err'));
+  drawTimeline();
+  updateStats();
+}
+
+function drawTimeline() {
+  const cv = cvTL;
+  resizeCanvas(cv);
+  const W = cv.width, H = cv.height;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0,0,W,H);
+
+  const dpr = window.devicePixelRatio||1;
+  const n = T;
+  const nTicks = 10;
+
+  ctx.strokeStyle = 'rgba(90,106,122,0.6)';
+  ctx.lineWidth = 1;
+  for (let i=0;i<=nTicks;i++) {
+    const x = Math.round((i/nTicks)*W)+0.5;
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke();
+    const lbl = Math.round(i/nTicks*n).toString();
+    ctx.fillStyle = 'rgba(90,106,122,0.8)';
+    ctx.font = `${9*dpr}px JetBrains Mono`;
+    ctx.fillText(lbl, x+2, H-3*dpr);
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   STATS
+───────────────────────────────────────────────────────────────────────── */
+function updateStats() {
+  if (!sig_err) return;
+  document.getElementById('stat-rmse').textContent   = rmse(sig_err).toExponential(3);
+  document.getElementById('stat-max').textContent    = maxAbs(sig_err).toExponential(3);
+  document.getElementById('stat-dpos').textContent   = maxAbs(delta_x).toExponential(3);
+  document.getElementById('stat-dvel').textContent   = maxAbs(delta_v).toExponential(3);
+  document.getElementById('stat-daccel').textContent = maxAbs(delta_a).toExponential(3);
+  document.getElementById('stat-T').textContent      = T;
+  document.getElementById('stat-sample').textContent = `${currentIdx} / ax${axis}`;
+
+  // Improvement: compare e_scale RMSE to (e_scale + delta_x) RMSE
+  const orig_rmse = rmse(sig_err);
+  const corr = new Float32Array(T);
+  for (let i=0;i<T;i++) corr[i] = sig_err[i] + delta_x[i];
+  const corr_rmse = rmse(corr);
+  const improv = orig_rmse / Math.max(corr_rmse, 1e-10);
+  const badge = document.getElementById('improvement-badge');
+  if (maxAbs(delta_x) > 1e-6) {
+    badge.style.display = 'block';
+    const pct = ((improv - 1)*100).toFixed(1);
+    badge.textContent = improv > 1 ? `▲ ${pct}% BETTER` : `▼ ${Math.abs(pct)}% WORSE`;
+    badge.className = 'improvement-badge ' + (improv > 1 ? 'pos' : 'neg');
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   BRUSH EDITING
+───────────────────────────────────────────────────────────────────────── */
+function getBrushParams() {
+  const width    = parseInt(document.getElementById('brush-width').value);
+  const strength = parseFloat(document.getElementById('brush-strength').value) / 100;
+  const falloff  = document.getElementById('brush-falloff').value;
+  return { width, strength, falloff };
+}
+
+function applyBrush(canvasX, canvasW, dy_norm) {
+  // canvasX in CSS pixels, canvasW in CSS pixels, dy_norm in normalized units
+  const { width, strength, falloff } = getBrushParams();
+  const center = Math.round((canvasX / canvasW) * T);
+  const half = Math.round(width / 2);
+
+  const target = editChannel === 'accel' ? delta_a
+               : editChannel === 'vel'   ? delta_v
+               :                           delta_x;
+
+  for (let i = Math.max(0, center - half); i < Math.min(T, center + half + 1); i++) {
+    const dist = Math.abs(i - center) / Math.max(half, 1);
+    let w;
+    if (falloff === 'gaussian') w = Math.exp(-4 * dist * dist);
+    else if (falloff === 'linear') w = Math.max(0, 1 - dist);
+    else w = 1;
+
+    target[i] += dy_norm * strength * w;
+  }
+
+  // Propagate kinematics
+  if (editChannel === 'accel') recomputeFromDeltaA();
+  else if (editChannel === 'vel') recomputeFromDeltaV();
+  else recomputeFromDeltaX();
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   CANVAS INTERACTION
+───────────────────────────────────────────────────────────────────────── */
+function canvasYToNormalized(cv, clientY) {
+  // Map client Y to a signal-space displacement
+  // We use the canvas height to define a scaling: full height = range of signal
+  const rect = cv.getBoundingClientRect();
+  const relY = clientY - rect.top;
+  const relYPrev = dragLastClientY - rect.top;
+  const dy = relYPrev - relY;  // positive = upward = increase
+  // Scale: let 1px of drag = 0.002 normalized units (adjustable by strength)
+  return dy * 0.002;
+}
+
+let dragLastClientY = 0;
+
+allCanvases.forEach(cv => {
+  cv.addEventListener('mousedown', e => {
+    if (!sig_pos) return;
+    isDragging = true;
+    dragCanvas = cv;
+    dragLastX = e.clientX;
+    dragLastClientY = e.clientY;
+    editIndicator.style.display = 'block';
+    e.preventDefault();
+  });
+
+  cv.addEventListener('mousemove', e => {
+    if (!sig_pos) return;
+
+    // Cursor line
+    const rect = cv.parentElement.getBoundingClientRect();
+    const canvasAreaRect = document.getElementById('canvas-area').getBoundingClientRect();
+    const xRelToArea = e.clientX - canvasAreaRect.left;
+    cursorLine.style.left = xRelToArea + 'px';
+    cursorLine.style.display = 'block';
+
+    const tIdx = Math.round((e.clientX - rect.left) / rect.width * (T-1));
+    cursorReadout.style.left = (xRelToArea + 8) + 'px';
+    cursorReadout.style.top  = '4px';
+    cursorReadout.style.display = 'block';
+    cursorReadout.textContent = `t=${tIdx}`;
+
+    if (!isDragging || dragCanvas !== cv) return;
+
+    const dy_norm = canvasYToNormalized(cv, e.clientY);
+    const rect2 = cv.getBoundingClientRect();
+    applyBrush(e.clientX - rect2.left, rect2.width, dy_norm);
+
+    dragLastX = e.clientX;
+    dragLastClientY = e.clientY;
+
+    renderAll();
+  });
+});
+
+document.addEventListener('mouseup', () => {
+  isDragging = false;
+  dragCanvas = null;
+  editIndicator.style.display = 'none';
+});
+
+document.getElementById('canvas-area').addEventListener('mouseleave', () => {
+  cursorLine.style.display = 'none';
+  cursorReadout.style.display = 'none';
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+   VIEW & EDIT MODE CONTROLS
+───────────────────────────────────────────────────────────────────────── */
+document.getElementById('view-radio').querySelectorAll('.radio-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('#view-radio .radio-item').forEach(i => i.classList.remove('active'));
+    item.classList.add('active');
+    viewMode = item.dataset.view;
+    renderAll();
+  });
+});
+
+document.getElementById('edit-radio').querySelectorAll('.radio-item').forEach(item => {
+  item.addEventListener('click', () => {
+    document.querySelectorAll('#edit-radio .radio-item').forEach(i => i.classList.remove('active'));
+    item.classList.add('active');
+    editChannel = item.dataset.edit;
+  });
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+   BUTTONS
+───────────────────────────────────────────────────────────────────────── */
+loadIdxBtn.addEventListener('click', () => {
+  const idx = parseInt(sampleIdxEl.value);
+  if (idx >= 0 && idx < N) loadSample(idx);
+  else alert(`Index out of range [0, ${N-1}]`);
+});
+
+randBtn.addEventListener('click', () => {
+  if (!npyData) return;
+  loadSample(Math.floor(Math.random() * N));
+});
+
+resetBtn.addEventListener('click', () => {
+  if (!sig_pos) return;
+  delta_a = new Float32Array(T);
+  delta_v = new Float32Array(T);
+  delta_x = new Float32Array(T);
+  renderAll();
+});
+
+smoothBtn.addEventListener('click', () => {
+  if (!delta_a) return;
+  // Gaussian smooth delta_a
+  const smoothed = new Float32Array(T);
+  const radius = 20;
+  for (let i=0;i<T;i++) {
+    let sum=0, w=0;
+    for (let k=-radius;k<=radius;k++) {
+      const j = i+k;
+      if (j<0||j>=T) continue;
+      const wk = Math.exp(-0.5*(k/radius)*(k/radius));
+      sum += delta_a[j]*wk; w+=wk;
+    }
+    smoothed[i] = sum/w;
+  }
+  delta_a = smoothed;
+  recomputeFromDeltaA();
+  renderAll();
+});
+
+/* ─────────────────────────────────────────────────────────────────────────
+   FILE LOADING
+───────────────────────────────────────────────────────────────────────── */
+function handleFile(file) {
+  if (!file.name.endsWith('.npy')) {
+    setStatus('Not a .npy file', 'err'); return;
+  }
+  setStatus('Loading…', 'warn');
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      npyData = parseNpy(e.target.result);
+      const s = npyData.shape;
+      if (s.length !== 3 || s[2] !== 12) {
+        setStatus(`Bad shape: [${s.join('×')}], expected N×T×12`, 'err');
+        npyData = null; return;
+      }
+      N = s[0]; T = s[1];
+      overlay.style.display = 'none';
+      nSamplesChip.textContent = `N=${N}  T=${T}  12ch`;
+      nSamplesChip.style.display = '';
+      nSamplesChip.className = 'status-chip ok';
+      setStatus('READY', 'ok');
+      loadSample(0);
+    } catch(err) {
+      setStatus('Parse error: '+err.message, 'err');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+fileInput.addEventListener('change', e => { if (e.target.files[0]) handleFile(e.target.files[0]); });
+
+// Drag-drop
+dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
+dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'));
+dropZone.addEventListener('drop', e => {
+  e.preventDefault(); dropZone.classList.remove('dragover');
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+// Also allow drag onto main area after load
+document.body.addEventListener('dragover', e => e.preventDefault());
+document.body.addEventListener('drop', e => {
+  e.preventDefault();
+  if (e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0]);
+});
+
+axisSel.addEventListener('change', () => { if (sig_pos) loadSample(currentIdx); });
+
+function setStatus(msg, type) {
+  statusChip.textContent = msg;
+  statusChip.className = 'status-chip ' + type;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   RESIZE
+───────────────────────────────────────────────────────────────────────── */
+const ro = new ResizeObserver(() => renderAll());
+ro.observe(document.getElementById('canvas-area'));
+
+renderAll();
+</script>
+</body>
+</html>
