@@ -97,7 +97,7 @@ PARAM_TABLE_PREDICTION = {
 
 PARAM_TABLE_COMPENSATION = {
     # ── Fixed ─────────────────────────────────────────────────────────────────
-    "data_path":                ("fixed",  "data/comp_dataset.npy",                  None),
+    "data_dir":                 ("fixed",  "data/comp/",                             None),
     "error_pred_checkpoint":    ("fixed",  "checkpoints/error_pred_x.pt",            None),
     "axis_selection":           ("fixed",  "x",                                      None),
     "downsample_factor":        ("fixed",  1,                                        None),

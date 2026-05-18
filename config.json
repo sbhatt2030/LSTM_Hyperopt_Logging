@@ -10,7 +10,6 @@
     "early_stopping_patience": 50,
     "early_stopping_min_delta": 0.0,
     "validation_frequency": 1,
-    "train_val_split": 0.8888888888888888,
     "verbose": 1,
     "generate_plots": true,
     "num_plot_samples": 3,
@@ -49,10 +48,10 @@
     "error_names": [
       "e_enc",
       "e_scale"
-    ]
+    ],
+    "train_val_split": 0.8888888888888888
   },
   "compensation_v3": {
-    "data_path": "data/comp_dataset.npy",
     "error_pred_checkpoint": "checkpoints/error_pred_x.pt",
     "pred_hidden_size": 32,
     "pred_num_layers": 2,
@@ -69,6 +68,7 @@
     "batch_size": null,
     "plot_save_dir": "plots/compensation_v3",
     "mlflow_tracking_uri": "http://hurco-lambda.hurco.com:8090",
-    "mlflow_experiment_name": "compensation_v3"
+    "mlflow_experiment_name": "compensation_v3",
+    "data_dir": "data/comp/"
   }
 }

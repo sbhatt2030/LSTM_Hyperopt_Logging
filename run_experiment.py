@@ -15,7 +15,7 @@ import time
 def _get_train_fn(pipeline: str):
     if pipeline == 'prediction':
         from train_val_loop_v10 import train_model
-    elif pipeline == 'compensation':
+    elif pipeline == 'compensation_v3':
         from train_val_loop_comp_v3 import train_model
     else:
         raise ValueError(
@@ -49,8 +49,8 @@ _VALID_KEYS = {
         'generate_plots', 'num_plot_samples', 'plot_save_dir', 'error_names',
     },
     'compensation_v3': {
-        'data_path', 'axis_selection', 'downsample_factor', 'random_seed',
-        'train_val_split',
+        'data_dir',
+        'axis_selection', 'downsample_factor', 'random_seed',
         'error_pred_checkpoint', 'pred_hidden_size', 'pred_num_layers',
         'comp_hidden_size', 'comp_num_layers', 'comp_dropout',
         'lambda_mlp', 'lambda_gru', 'warmup_timesteps',

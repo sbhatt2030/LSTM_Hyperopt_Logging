@@ -40,6 +40,7 @@ import datetime
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 
+import json
 import numpy as np
 import torch
 import torch.nn as nn
@@ -60,11 +61,18 @@ from train_val_loop_v10 import SequenceModel, EarlyStopping
 # Columns in the raw 4D tensor X[M, N, L, F].
 # Adjust these indices to match your actual stored column order.
 
-DATASET_COL_POS   = [0, 1, 2]   # cmd_pos_{x,y,z}
-DATASET_COL_ERROR = [3, 4, 5]   # following error_{x,y,z}
-DATASET_COL_VFF   = [6, 7, 8]   # injected vff_{x,y,z}
+# kinematics.npy  (M, L, 9) — trajectory-level
+# Group offsets: pos=0, vel=3, accel=6  (3 axes each)
+KIN_POS_OFFSET   = 0   # pos_x at col 0, pos_y at col 1, pos_z at col 2
+KIN_VEL_OFFSET   = 3
+KIN_ACCEL_OFFSET = 6
 
-AXIS_COL = {                     # per-axis column within each group
+# ev.npy  (M, N, L, 6) — instance-level
+# Group offsets: e_enc=0, vff=3  (3 axes each)
+EV_ERR_OFFSET    = 0   # e_enc_x at col 0, e_enc_y at col 1, e_enc_z at col 2
+EV_VFF_OFFSET    = 3
+
+AXIS_COL = {
     'x': 0,
     'y': 1,
     'z': 2,
@@ -75,51 +83,119 @@ AXIS_COL = {                     # per-axis column within each group
 # SECTION 2: DATASET
 # ============================================================================
 
-def load_and_subset(
-    data_path:         str,
+# Standard filenames inside data_dir — never need to change these
+DATA_KINEMATICS = 'kinematics.npy'
+DATA_EV         = 'ev.npy'
+DATA_SPLITS     = 'splits.json'
+
+
+def load_two_files(
+    data_dir:          str,
     axis:              str,
     downsample_factor: int = 1,
-) -> np.ndarray:
+) -> tuple:
     """
-    Load the 4D tensor once and return a 3-column subset for one axis.
+    Load the two-file dataset and return per-axis subsets.
 
     Returns
     -------
-    X_shared : np.ndarray, shape (M, N, L, 3), float32, C-contiguous
-        Columns: [cmd_pos, error, vff]  for the requested axis.
-        Both train and val datasets receive a reference to this same array —
-        no copy is made.
-    """
-    print(f"[load_and_subset] Loading {data_path} ...")
-    X = np.load(data_path)                      # (M, N, L, F)
-    print(f"  Raw shape : {X.shape}  dtype: {X.dtype}")
+    pos_shared : np.ndarray, shape (M, L, 1), float32, C-contiguous
+        cmd_pos for the selected axis. Trajectory-level — no N dimension.
+        Both train and val datasets share the same array reference.
 
-    M, N, L, F = X.shape
+    ev_shared : np.ndarray, shape (M, N, L, 2), float32, C-contiguous
+        Columns: [e_enc, vff] for the selected axis. Instance-level.
+        Both train and val datasets share the same array reference.
+    """
+    a = AXIS_COL[axis]
+
+    # ── kinematics.npy ────────────────────────────────────────────────────────
+    kinematics_path = os.path.join(data_dir, DATA_KINEMATICS)
+    ev_path         = os.path.join(data_dir, DATA_EV)
+
+    print(f"[load_two_files] Loading {kinematics_path} ...")
+    kin = np.load(kinematics_path)               # (M, L, 9)
+    print(f"  kinematics shape : {kin.shape}  dtype: {kin.dtype}")
+
+    M, L, _ = kin.shape
 
     if downsample_factor > 1:
-        X = X[:, :, ::downsample_factor, :]
-        L = X.shape[2]
-        print(f"  After downsample ×{downsample_factor}: L={L}")
+        kin = kin[:, ::downsample_factor, :]
+        L   = kin.shape[1]
+        print(f"  After downsample x{downsample_factor}: L={L}")
 
-    a       = AXIS_COL[axis]
-    pos_col = DATASET_COL_POS[a]
-    err_col = DATASET_COL_ERROR[a]
-    vff_col = DATASET_COL_VFF[a]
-
-    X_shared = np.ascontiguousarray(
-        X[:, :, :, [pos_col, err_col, vff_col]], dtype=np.float32
+    pos_col    = KIN_POS_OFFSET + a
+    pos_shared = np.ascontiguousarray(
+        kin[:, :, pos_col:pos_col+1], dtype=np.float32   # (M, L, 1)
     )
-    del X   # release full tensor immediately
+    del kin
 
-    print(f"  Subset shape (M={M}, N={N}, L={L}, 3 cols): {X_shared.shape}")
-    print(f"  Approx. RAM : {X_shared.nbytes / 1e9:.2f} GB")
-    return X_shared
+    # ── ev.npy ────────────────────────────────────────────────────────────────
+    print(f"[load_two_files] Loading {ev_path} ...")
+    ev = np.load(ev_path)                        # (M, N, L, 6)
+    print(f"  ev shape         : {ev.shape}  dtype: {ev.dtype}")
+
+    M_ev, N, L_ev, _ = ev.shape
+    assert M_ev == M,  f"Trajectory count mismatch: kinematics M={M}, ev M={M_ev}"
+    assert L_ev == L or downsample_factor == 1,         f"Sequence length mismatch after downsample: kin L={L}, ev L={L_ev}"
+
+    if downsample_factor > 1:
+        ev = ev[:, :, ::downsample_factor, :]
+
+    err_col   = EV_ERR_OFFSET + a
+    vff_col   = EV_VFF_OFFSET + a
+    ev_shared = np.ascontiguousarray(
+        ev[:, :, :, [err_col, vff_col]], dtype=np.float32   # (M, N, L, 2)
+    )
+    del ev
+
+    print(f"  pos_shared : {pos_shared.shape}  ({pos_shared.nbytes / 1e9:.3f} GB)")
+    print(f"  ev_shared  : {ev_shared.shape}  ({ev_shared.nbytes / 1e9:.3f} GB)")
+    return pos_shared, ev_shared
+
+
+def load_splits(data_dir: str) -> tuple:
+    """
+    Load predetermined train/val/test triplet lists from splits.json
+    produced by Tool 3 Stage 3.
+
+    splits.json schema:
+        {
+          "train": [[traj_idx, inst_i, inst_j], ...],
+          "val":   [[traj_idx, inst_i, inst_j], ...],
+          "test":  [[traj_idx, inst_i, inst_j], ...],
+          "n_trajectories": int,
+          "n_instances":    int,
+          "instance_ids":   [int, ...]
+        }
+
+    Returns
+    -------
+    train_indices, val_indices, test_indices : list of (m, i, j) tuples.
+        i and j are 0-based positions into ev_shared's N axis, which must
+        be assembled in instance_ids order by Tool 3 Stage 3.
+    """
+    splits_path = os.path.join(data_dir, DATA_SPLITS)
+    with open(splits_path) as f:
+        splits = json.load(f)
+
+    train = [tuple(t) for t in splits['train']]
+    val   = [tuple(t) for t in splits['val']]
+    test  = [tuple(t) for t in splits['test']]
+
+    print(f"[load_splits] {splits_path}")  # splits_path resolved above
+    print(f"  Train {len(train):,}  Val {len(val):,}  Test {len(test):,}")
+    print(f"  Trajectories: {splits['n_trajectories']}  "
+          f"Instances: {splits['n_instances']}  "
+          f"Instance IDs: {splits['instance_ids']}")
+    return train, val, test
 
 
 def build_index_list(M: int, N: int, random_seed: int) -> list:
     """
-    Build and shuffle the full list of (traj, i, j) permutation indices.
-    M × N × (N-1) entries total.
+    Utility — build all (traj, i, j) permutation indices.
+    Not called during training (splits come from splits.json).
+    Retained for offline inspection or regenerating splits.
     """
     index_list = [
         (m, i, j)
@@ -131,34 +207,38 @@ def build_index_list(M: int, N: int, random_seed: int) -> list:
     rng = np.random.default_rng(seed=random_seed)
     rng.shuffle(index_list)
     print(f"  Index list: {len(index_list):,} permutations  "
-          f"(M={M} × N={N} × {N-1})")
+          f"(M={M} x N={N} x {N-1})")
     return index_list
 
 
 class CompPermutationDataset(Dataset):
     """
-    Thin wrapper around a pre-loaded shared 4D array and a pre-split index list.
+    Thin wrapper around two pre-loaded shared arrays and a pre-split index list.
 
-    Both train and val datasets hold a reference to the same X_shared numpy
-    array — no copy, no second load.  The OS copy-on-write mechanism handles
-    DataLoader worker forking transparently.
+    Both train and val datasets hold references to the same pos_shared and
+    ev_shared arrays — no copies are made. OS copy-on-write handles DataLoader
+    worker forking transparently.
 
     Parameters
     ----------
-    X_shared : np.ndarray, shape (M, N, L, 3)
-        Output of load_and_subset().  Columns: [cmd_pos, error, vff].
+    pos_shared : np.ndarray, shape (M, L, 1)
+        cmd_pos for the selected axis. Trajectory-level (no N dimension).
+    ev_shared : np.ndarray, shape (M, N, L, 2)
+        [e_enc, vff] for the selected axis. Instance-level.
     indices : list of (traj_idx, i, j) tuples
-        Pre-split subset of the full permutation index list.
+        Pre-split subset loaded from splits.json.
     dtype : torch.dtype
     """
 
     def __init__(
         self,
-        X_shared: np.ndarray,
-        indices:  list,
-        dtype:    torch.dtype = torch.float32,
+        pos_shared: np.ndarray,
+        ev_shared:  np.ndarray,
+        indices:    list,
+        dtype:      torch.dtype = torch.float32,
     ):
-        self.X       = X_shared   # shared reference — no copy
+        self.pos     = pos_shared   # (M, L, 1)    — shared reference
+        self.ev      = ev_shared    # (M, N, L, 2) — shared reference
         self.indices = indices
         self.dtype   = dtype
 
@@ -166,13 +246,13 @@ class CompPermutationDataset(Dataset):
         return len(self.indices)
 
     def __getitem__(self, idx: int):
-        m, i, j  = self.indices[idx]
-        run_i     = self.X[m, i]              # (L, 3): [cmd_pos, error, vff]
-        run_j     = self.X[m, j]
+        m, i, j = self.indices[idx]
 
-        cmd_pos   = run_i[:, 0:1]             # identical for i and j
-        delta_e   = run_i[:, 1:2] - run_j[:, 1:2]
-        delta_vff = run_i[:, 2:3] - run_j[:, 2:3]
+        cmd_pos   = self.pos[m]                          # (L, 1)
+        delta_e   = (self.ev[m, i, :, 0:1]
+                   - self.ev[m, j, :, 0:1])              # e_enc_i - e_enc_j  (L, 1)
+        delta_vff = (self.ev[m, i, :, 1:2]
+                   - self.ev[m, j, :, 1:2])              # vff_i   - vff_j    (L, 1)
 
         return (
             torch.tensor(cmd_pos,   dtype=self.dtype),   # (L, 1)
@@ -758,11 +838,10 @@ def compute_dynamic_batch_size(
 
 def train_model(
     # ── Data ─────────────────────────────────────────────────────────────────
-    data_path:                  str,
+    data_dir:                   str,
     axis_selection:             str   = 'x',
     downsample_factor:          int   = 1,
     random_seed:                int   = 0,
-    train_val_split:            float = 8 / 9,
     # ── Error-pred GRU (frozen, Stage 1) ─────────────────────────────────────
     error_pred_checkpoint:      str   = '',
     pred_hidden_size:           int   = 64,
@@ -838,18 +917,23 @@ def train_model(
         print("STEP 1: Datasets")
         print("=" * 80)
 
-    # Load the 4D tensor once — train and val share the same array reference.
-    X_shared   = load_and_subset(data_path, axis_selection, downsample_factor)
-    M, N       = X_shared.shape[:2]
-    index_list = build_index_list(M, N, random_seed=seed_used)
-    n_train    = int(train_val_split * len(index_list))
+    # Load two files — pos_shared and ev_shared are shared references (no copy).
+    pos_shared, ev_shared = load_two_files(
+        data_dir, axis_selection, downsample_factor
+    )
+    M = pos_shared.shape[0]
+    N = ev_shared.shape[1]
+    L = pos_shared.shape[1]
 
-    train_ds = CompPermutationDataset(X_shared, index_list[:n_train])
-    val_ds   = CompPermutationDataset(X_shared, index_list[n_train:])
-    # Resolve dynamic batch size now that X_shared tells us sequence length
+    train_indices, val_indices, _ = load_splits(data_dir)
+
+    train_ds = CompPermutationDataset(pos_shared, ev_shared, train_indices)
+    val_ds   = CompPermutationDataset(pos_shared, ev_shared, val_indices)
+
+    # Resolve dynamic batch size now that L is known
     if _resolve_batch_size_later:
         batch_size = compute_dynamic_batch_size(
-            sequence_length  = X_shared.shape[2],
+            sequence_length  = L,
             n_input_features = 3,   # [cmd_pos, delta_e, delta_vff] per timestep
             gpu              = gpu_comp,
         )
@@ -926,7 +1010,7 @@ def train_model(
     mlflow.log_params({
         'pipeline':                'compensation_v3',
         'axis_selection':          axis_selection,
-        'data_path':               data_path,
+        'data_dir':                data_dir,
         'downsample_factor':       downsample_factor,
         'random_seed_used':        seed_used,
         'pred_hidden_size':        pred_hidden_size,
@@ -1098,7 +1182,7 @@ if __name__ == '__main__':
     print("Minimal example:")
     print("  from train_val_loop_comp_v3 import train_model")
     print("  model, history = train_model(")
-    print("      data_path              = 'data/comp_dataset.npy',")
+    print("      data_dir               = 'data/comp/',")
     print("      error_pred_checkpoint  = 'checkpoints/error_pred_x.pt',")
     print("      pred_hidden_size       = 64,")
     print("      comp_hidden_size       = 32,")
