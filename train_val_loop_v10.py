@@ -1088,6 +1088,42 @@ def visualize_predictions(
 # MASTER TRAINING ORCHESTRATOR
 # ============================================================================
 
+def compute_dynamic_batch_size(
+    vram_fraction: float = 0.85,
+    cap:           int   = 1024,
+    device:        str   = 'cuda',
+) -> int:
+    """
+    Estimate a safe batch size from free VRAM on the given device.
+    Called when batch_size=None is passed to train_model.
+
+    vram_fraction : fraction of free VRAM to target (leaves headroom for
+                    activations and gradient buffers during backprop)
+    cap           : hard upper limit for gradient stability
+    """
+    import math as _math
+    if not torch.cuda.is_available():
+        default = 32
+        print(f"[dynamic_batch_size] CUDA not available — using {default}")
+        return default
+
+    dev = torch.device(device if torch.cuda.is_available() else 'cpu')
+    torch.cuda.synchronize(dev)
+    free_bytes, total_bytes = torch.cuda.mem_get_info(dev)
+
+    # Conservative estimate: 4 bytes/element, ~10 feature cols, 8000 timesteps
+    bytes_per_sample = 8000 * 10 * 4
+    raw  = int(free_bytes * vram_fraction / bytes_per_sample)
+    raw  = max(1, min(raw, cap))
+    pow2 = 2 ** int(_math.floor(_math.log2(raw))) if raw >= 1 else 1
+
+    print(
+        f"[dynamic_batch_size] free={free_bytes/1e9:.1f}GB / "
+        f"total={total_bytes/1e9:.1f}GB  raw={raw}  pow2={pow2}"
+    )
+    return pow2
+
+
 def train_model(
     # Data parameters
     data_file_path: str,
@@ -1122,7 +1158,7 @@ def train_model(
     
     # Training parameters
     num_epochs: int = 50,
-    batch_size: int = 32,
+    batch_size: Optional[int] = None,  # None -> dynamic based on free VRAM
     learning_rate: float = 0.001,
     optimizer_type: str = 'adam',
     optimizer_kwargs: Optional[Dict[str, Any]] = None,
@@ -1175,6 +1211,11 @@ def train_model(
     
     start_time = time.time()
     
+    # Resolve dynamic batch size before DataLoader is created
+    if batch_size is None:
+        batch_size = compute_dynamic_batch_size(device=device)
+        print(f'  Dynamic batch_size resolved to: {batch_size}')
+
     # ========================================================================
     # STEP 1: CREATE DATASET
     # ========================================================================

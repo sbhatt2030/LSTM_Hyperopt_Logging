@@ -15,13 +15,67 @@ import time
 def _get_train_fn(pipeline: str):
     if pipeline == 'prediction':
         from train_val_loop_v10 import train_model
-    elif pipeline == 'compensation_old':
-        from train_val_loop_comp import train_model
-    elif pipeline == "compensation_new":
-        from train_val_loop_comp_v2 import train_model
+    elif pipeline == 'compensation':
+        from train_val_loop_comp_v3 import train_model
     else:
-        raise ValueError(f"Unknown pipeline: '{pipeline}'. Must be 'prediction' or 'compensation'.")
+        raise ValueError(
+            f"Unknown pipeline: '{pipeline}'. "
+            f"Valid options: 'prediction', 'compensation_v3'."
+        )
     return train_model
+
+
+# Keys accepted by each pipeline's train_model.
+# Any config key NOT in this set is silently dropped before the call,
+# preventing "unexpected keyword argument" crashes when shared or
+# pipeline-specific keys don't exist in the other pipeline's signature.
+_VALID_KEYS = {
+    'prediction': {
+        'data_file_path', 'target_timesteps', 'axis_selection',
+        'downsample_factor', 'include_velocity', 'include_acceleration',
+        'motion_threshold', 'min_position_change', 'train_val_split',
+        'random_seed', 'run_purpose',
+        'model_type', 'hidden_size', 'num_layers', 'dropout', 'bidirectional',
+        'load_model_path', 'load_model_strict',
+        'base_loss', 'l2_weight', 'jacobian_weight', 'jacobian_every_n_batches',
+        'hidden_derivative_weight', 'hidden_derivative_every_n_batches',
+        'max_abs_weight', 'warmup_timesteps',
+        'num_epochs', 'batch_size', 'learning_rate', 'optimizer_type',
+        'optimizer_kwargs', 'gradient_clip_value', 'device',
+        'mlflow_experiment_id', 'tracking_uri',
+        'early_stopping_patience', 'early_stopping_min_delta',
+        'validation_frequency', 'num_workers',
+        'verbose', 'return_history', 'save_model_path', 'save_best_only',
+        'generate_plots', 'num_plot_samples', 'plot_save_dir', 'error_names',
+    },
+    'compensation_v3': {
+        'data_path', 'axis_selection', 'downsample_factor', 'random_seed',
+        'train_val_split',
+        'error_pred_checkpoint', 'pred_hidden_size', 'pred_num_layers',
+        'comp_hidden_size', 'comp_num_layers', 'comp_dropout',
+        'lambda_mlp', 'lambda_gru', 'warmup_timesteps',
+        'learning_rate', 'num_epochs', 'batch_size', 'gradient_clip_value',
+        'early_stopping_patience', 'early_stopping_min_delta',
+        'validation_frequency',
+        'save_model_path', 'save_best_only',
+        'plot_save_dir', 'generate_plots', 'num_plot_samples',
+        'gpu_pred', 'gpu_comp',
+        'mlflow_tracking_uri', 'mlflow_experiment_name', 'mlflow_run_name',
+        'mlflow_experiment_id',
+        'verbose', 'num_workers', 'return_history',
+    },
+}
+
+
+def _filter_config(config: dict, pipeline: str) -> dict:
+    """Drop any keys not accepted by this pipeline's train_model."""
+    valid = _VALID_KEYS.get(pipeline, set())
+    dropped = [k for k in config if k not in valid]
+    if dropped:
+        print(f"  [config filter] dropping {len(dropped)} key(s) not valid "
+              f"for '{pipeline}': {dropped}")
+    return {k: v for k, v in config.items() if k in valid}
+
 
 def load_config(config_path='config.json'):
     """Load shared configuration from JSON file."""
@@ -30,11 +84,30 @@ def load_config(config_path='config.json'):
     return config
 
 
-def flatten_config(config):
-    """Flatten nested config structure into single dict."""
+def flatten_config(config, pipeline: str = 'prediction'):
+    """
+    Flatten the new pipeline-aware config structure.
+
+    Merge order (right wins):
+        shared  <  pipeline-specific section
+
+    Keys starting with '_' (e.g. _comment) are dropped.
+    Unknown pipeline names fall back to shared-only.
+    """
     flat = {}
-    for section, params in config.items():
-        flat.update(params)
+    # shared defaults
+    for k, v in config.get('shared', {}).items():
+        if not k.startswith('_'):
+            flat[k] = v
+    # pipeline-specific overrides
+    for k, v in config.get(pipeline, {}).items():
+        if not k.startswith('_'):
+            flat[k] = v
+    # Legacy flat format (old config.json has no 'shared' key)
+    if 'shared' not in config:
+        for section, params in config.items():
+            if isinstance(params, dict):
+                flat.update(params)
     return flat
 
 
@@ -98,7 +171,7 @@ def run_experiment(csv_path: str, config_path: str, experiment_idx: int, extra_c
         >>> print(f"Final validation loss: {final_loss:.6f}")
     """
     # Load configurations
-    base_config = flatten_config(load_config(config_path))
+    base_config = flatten_config(load_config(config_path), pipeline=pipeline)
     experiments_df = load_experiments(csv_path)
     
     # Validate index
@@ -128,15 +201,19 @@ def run_experiment(csv_path: str, config_path: str, experiment_idx: int, extra_c
     try:
         # Train model
         train_model = _get_train_fn(pipeline)
-        model, history, seed = train_model(**config)
+        config = _filter_config(config, pipeline)
+        result = train_model(**config)
+        model, history, seed = result if len(result) == 3 else (*result, None)
         
         # Get final validation loss
-        if history and 'val_loss' in history and len(history['val_loss']) > 0:
-            final_val_loss = history['val_loss'][-1]
+        # All pipelines use 'val_loss' as the key (compensation_v3 also uses this).
+        val_history = history.get('val_loss') if history else None
+        if val_history and len(val_history) > 0:
+            final_val_loss = val_history[-1]
         else:
             raise RuntimeError(
                 f"No validation loss returned for experiment '{exp_name}'. "
-                f"Check that validation_frequency > 0 in config."
+                f"Check that validation_frequency > 0 in config and return_history=True."
             )
         
         # Verify it's a valid number

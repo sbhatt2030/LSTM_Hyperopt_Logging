@@ -1,130 +1,207 @@
-import mlflow
+"""
+Hyperparameter optimisation — prediction and compensation_v3 pipelines.
+
+Configuration model
+-------------------
+Everything lives in one PARAM_TABLE per pipeline. Each entry is:
+
+    "param_name": (kind, value_or_range, initial)
+
+    kind = "fixed"  -> passed to every trial, used to filter MLflow history
+    kind = "search" -> searched by Optuna; initial seeds the TPE warm-start
+    kind = "trial"  -> passed every trial, NOT used to filter MLflow history
+                       (infrastructure settings: device, verbose, etc.)
+
+FIXED_PARAMS, SEARCH_SPACE, INITIAL_POINT, and TRIAL_PARAMS are all derived
+from the table automatically. There is no separate place to keep in sync.
+
+Checkpoint warm-starting
+------------------------
+Set CHECKPOINT["path"] to a saved model file to lock the architecture and
+warm-start weights. Any param listed in CHECKPOINT["locked"] that is currently
+"search" in the table is automatically moved to fixed. Set path=None to
+train from scratch.
+
+Multi-GPU (compensation_v3)
+---------------------------
+Each compensation trial needs two GPUs (gpu_pred + gpu_comp). Ray sets
+CUDA_VISIBLE_DEVICES per-trial so inside each trial process the two GPUs are
+always visible as cuda:0 and cuda:1.
+  4 GPUs + compensation_v3: MAX_CONCURRENT = 2  (2 trials x 2 GPUs)
+  4 GPUs + prediction:      MAX_CONCURRENT = 4  (4 trials x 1 GPU)
+"""
+
+import math
 import os
 import sys
-import math
+import time
+
+import mlflow
 import ray
+from mlflow.tracking import MlflowClient
 from ray import tune
 from ray.tune.search import ConcurrencyLimiter, Repeater
 from ray.tune.search.optuna.optuna_search import OptunaSearch
-from mlflow.tracking import MlflowClient
-import time
+
 from run_experiment import run_experiment
 
 # ============================================================================
-# ✏️  CONFIGURE EVERYTHING HERE — nothing else should need editing
+# TOP-LEVEL SWITCH  -- only thing you need to change when swapping pipelines
 # ============================================================================
+
+# 'prediction'      -> 1 GPU per trial
+# 'compensation_v3' -> 2 GPUs per trial
+PIPELINE = 'compensation_v3'
 
 TRACKING_URI = "http://hurco-lambda.hurco.com:8090"
 
-# --- Fixed params: passed to every trial AND used to filter MLflow history.
-# Changing any of these makes historical runs incomparable, so they act as
-# the filter criteria when loading warm-start points from MLflow.
-FIXED_PARAMS = {
-    "data_file_path":           "data/permutation_filtered_complete_dataset_1_5.npy",
-    "target_timesteps":        8000,
-    "downsample_factor":        1,
-    "axis_selection":           "x",
-    "base_loss":                "mse",
-    "max_abs_weight":           0,
-    "jacobian_weight":          0,
-    "hidden_derivative_weight": 0,
-    "run_purpose": "compensation_new",
-    "model_type": "gru",
-    "num_layers": 3,
-    "hidden_size":  32
+# ============================================================================
+# PARAM TABLES
+#
+# Each entry:  "name": (kind, value_or_dist, initial)
+#
+#   kind = "fixed"  locked; every trial gets this value; MLflow history filter
+#   kind = "search" Optuna searches this; initial seeds the TPE
+#   kind = "trial"  every trial gets this value; NOT in MLflow filter
+#
+# POW2 params: the search space stores the exponent (e.g. 5 -> 2**5 = 32).
+# Add the param name to POW2_PARAMS below.
+# ============================================================================
+
+PARAM_TABLE_PREDICTION = {
+    # ── Fixed ─────────────────────────────────────────────────────────────────
+    "data_file_path":           ("fixed",  "data/complete_error_prediction_data.npy", None),
+    "target_timesteps":         ("fixed",  8000,                                      None),
+    "downsample_factor":        ("fixed",  1,                                         None),
+    "axis_selection":           ("fixed",  "x",                                       None),
+    "base_loss":                ("fixed",  "mse",                                     None),
+    "jacobian_weight":          ("fixed",  0,                                         None),
+    "hidden_derivative_weight": ("fixed",  0,                                         None),
+    "model_type":               ("fixed",  "gru",                                     None),
+    "num_layers":               ("fixed",  2,                                         None),
+    "hidden_size":              ("fixed",  32,                                        None),
+    "run_purpose":              ("fixed",  "prediction",                              None),
+    # ── Searched ──────────────────────────────────────────────────────────────
+    "l2_weight":                ("search", tune.loguniform(1e-6, 1e-2),               5e-4),
+    "dropout":                  ("search", tune.uniform(0.0, 0.5),                    0.1 ),
+    "learning_rate":            ("search", tune.loguniform(1e-6, 1e-1),               5e-3),
+    # Uncomment to search architecture (also remove from fixed above):
+    # "hidden_size":            ("search", tune.randint(4, 8),                        5   ),  # pow2
+    # "num_layers":             ("search", tune.randint(1, 5),                        2   ),
+    # ── Trial (infra) ─────────────────────────────────────────────────────────
+    "batch_size":               ("trial",  None,                                      None),  # None -> dynamic
+    "device":                   ("trial",  "cuda",                                    None),
+    "verbose":                  ("trial",  0,                                         None),
+    "generate_plots":           ("trial",  False,                                     None),
 }
 
-# --- Trial params: passed to every trial but NOT used to filter MLflow history.
-# These are housekeeping / infrastructure settings that don't affect the loss.
-TRIAL_PARAMS = {
-    "batch_size": 256,
-    "device":     "cuda",
-    "verbose":    0,
+PARAM_TABLE_COMPENSATION = {
+    # ── Fixed ─────────────────────────────────────────────────────────────────
+    "data_path":                ("fixed",  "data/comp_dataset.npy",                  None),
+    "error_pred_checkpoint":    ("fixed",  "checkpoints/error_pred_x.pt",            None),
+    "axis_selection":           ("fixed",  "x",                                      None),
+    "downsample_factor":        ("fixed",  1,                                        None),
+    "pred_hidden_size":         ("fixed",  32,                                       None),
+    "pred_num_layers":          ("fixed",  2,                                        None),
+    "comp_num_layers":          ("fixed",  1,                                        None),
+    "run_purpose":              ("fixed",  "compensation_v3",                        None),
+    # ── Searched ──────────────────────────────────────────────────────────────
+    "lambda_mlp":               ("search", tune.loguniform(1e-5, 1e-1),              1e-4),
+    "lambda_gru":               ("search", tune.loguniform(1e-6, 1e-3),              1e-5),
+    "learning_rate":            ("search", tune.loguniform(1e-4, 1e-2),              1e-3),
+    "comp_hidden_size":         ("search", tune.randint(4, 8),                       5   ),  # pow2: 2**5=32
+    # Uncomment to search depth:
+    # "comp_num_layers":        ("search", tune.randint(1, 4),                       1   ),
+    # ── Trial (infra) ─────────────────────────────────────────────────────────
+    "batch_size":               ("trial",  None,                                     None),  # None -> dynamic
+    "gpu_pred":                 ("trial",  "cuda:0",                                 None),  # within CUDA_VISIBLE_DEVICES
+    "gpu_comp":                 ("trial",  "cuda:1",                                 None),
+    "verbose":                  ("trial",  0,                                        None),
+    "generate_plots":           ("trial",  False,                                    None),
 }
 
-# --- Warm-start checkpoint.
-# Set LOAD_MODEL_PATH to None to train from scratch.
-# When set, hidden_size is fixed to CHECKPOINT_HIDDEN_SIZE (must match the
-# checkpoint architecture) and is NOT searched.
-LOAD_MODEL_PATH        = "/home/bhatts/LSTM_Hyperopt_Logging/~/mlartifacts/234/models/m-9e06497a9e904bd29e8c703fef64d699/artifacts/data/model.pth"
-LOAD_MODEL_STRICT      = True
-CHECKPOINT_HIDDEN_SIZE = 32   # ignored when LOAD_MODEL_PATH is None
+PARAM_TABLE = (
+    PARAM_TABLE_COMPENSATION if PIPELINE == 'compensation_v3'
+    else PARAM_TABLE_PREDICTION
+)
 
-# --- Search space.
-# hidden_size uses tune.randint over exponents — actual value = 2**n.
-# e.g. randint(4, 8) searches over {16, 32, 64, 128}.
-# Remove hidden_size when warm-starting (architecture is locked to checkpoint).
-SEARCH_SPACE = {
-    "l2_weight":     tune.loguniform(1e-6, 1e-2),
-    "dropout":       tune.uniform(0, 0.5),
-    "learning_rate": tune.loguniform(1e-6, 1e-2),
-    #"num_layers":    tune.randint(1,5),
-    #"hidden_size":   tune.randint(1,7)
-    #"jacobian_weight":tune.loguniform(1e-1, 50),
-    #"hidden_derivative_weight": tune.loguniform(1e-2, 5e4),
-    #"max_abs_weight": tune.loguniform(0.1,10)
+# Params stored as exponents in the search space (actual value = 2**exponent).
+POW2_PARAMS = {"hidden_size", "comp_hidden_size"}
 
+# ============================================================================
+# CHECKPOINT
+#
+# path=None  -> train from scratch
+# path=str   -> load weights; params in "locked" are moved from search->fixed
+# ============================================================================
+
+CHECKPOINT = {
+    "path": None,
+    # Values to lock when a checkpoint is loaded. Only params currently
+    # "search" in the table are affected; others are ignored silently.
+    "locked": {
+        "hidden_size":      32,   # prediction (actual value, not exponent)
+        "comp_hidden_size": 32,   # compensation_v3 (actual value, not exponent)
+    },
 }
 
-# --- Hand-picked fallback starting point.
-# Used only when no usable MLflow history exists.
-# hidden_size here is the exponent (e.g. 6 → 2**6 = 64).
-INITIAL_POINT = {
-    "l2_weight":     5e-4,
-    "dropout":       0.1,
-    "learning_rate": 5e-3,
-    #"num_layers":    3,       # actual int, not exponent
-    #"hidden_size":   5       # exponent → 2**6 = 64
-}
+# ============================================================================
+# RAY TUNE SETTINGS
+# ============================================================================
 
-# --- Ray Tune settings ---
 NUM_SAMPLES    = 100
 REPEAT         = 2
-MAX_CONCURRENT = 5
-PIPELINE = FIXED_PARAMS["run_purpose"]
+GPUS_PER_TRIAL = 2 if PIPELINE == 'compensation_v3' else 1
+MAX_CONCURRENT = 2 if PIPELINE == 'compensation_v3' else 4
 
 # ============================================================================
-# INTERNALS — no need to edit below this line
+# DERIVED CONFIG  (computed from the table — do not edit below this line)
 # ============================================================================
 
-# Params stored as exponents in the search space and in MLflow history,
-# transformed via 2** before being passed to the model.
-POW2_PARAMS = {"hidden_size"}
+def _derive(
+    table:      dict,
+    checkpoint: dict,
+) -> tuple[dict, dict, dict, dict]:
+    """
+    Derive FIXED_PARAMS, SEARCH_SPACE, INITIAL_POINT, TRIAL_PARAMS from table.
 
+    Checkpoint locking moves architecture params from search -> fixed using
+    the value in checkpoint["locked"], and injects load_model_path into trial.
+    """
+    fixed   = {k: v for k, (kind, v, _) in table.items() if kind == "fixed"}
+    search  = {k: v for k, (kind, v, _) in table.items() if kind == "search"}
+    initial = {k: i for k, (kind, _, i) in table.items() if kind == "search"}
+    trial   = {k: v for k, (kind, v, _) in table.items() if kind == "trial"}
+
+    if checkpoint["path"] is not None:
+        for param, locked_val in checkpoint["locked"].items():
+            if param in search:
+                # Store exponent in fixed if this is a pow2 param,
+                # so MLflow filtering compares apples to apples.
+                fixed[param] = locked_val
+                search.pop(param)
+                initial.pop(param, None)
+                print(f"  [checkpoint] '{param}' moved search -> fixed = {locked_val}")
+        trial["load_model_path"]   = checkpoint["path"]
+        trial["load_model_strict"] = True
+
+    return fixed, search, initial, trial
+
+
+FIXED_PARAMS, SEARCH_SPACE, INITIAL_POINT, TRIAL_PARAMS = _derive(PARAM_TABLE, CHECKPOINT)
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _resolve_search_params(raw: dict) -> dict:
-    """Apply pow2 transform to any params that need it, pass the rest through."""
+    """Apply 2** transform to pow2 params before passing to train_model."""
     return {
         k: (2 ** int(v) if k in POW2_PARAMS else v)
         for k, v in raw.items()
     }
 
 
-def _checkpoint_params() -> dict:
-    """Checkpoint-related overrides, or empty dict if training from scratch."""
-    if LOAD_MODEL_PATH is None:
-        return {}
-    return {
-        "hidden_size":       CHECKPOINT_HIDDEN_SIZE,
-        "load_model_path":   LOAD_MODEL_PATH,
-        "load_model_strict": LOAD_MODEL_STRICT,
-    }
-
-
-def _fixed_params_for_filtering() -> dict:
-    """
-    The params historical MLflow runs must match to be comparable.
-    = FIXED_PARAMS + hidden_size when warm-starting (architecture is locked).
-    TRIAL_PARAMS excluded — they don't affect loss comparability.
-    """
-    fixed = {**FIXED_PARAMS}
-    if LOAD_MODEL_PATH is not None:
-        fixed["hidden_size"] = CHECKPOINT_HIDDEN_SIZE
-    return fixed
-
-
 def _get_bounds(search_space: dict) -> dict:
-    """Extract numeric (low, high) bounds for filtering historical points."""
     return {
         k: (v.lower, v.upper)
         for k, v in search_space.items()
@@ -140,31 +217,6 @@ def _within_bounds(point: dict, bounds: dict) -> bool:
     )
 
 
-# ── Objective ─────────────────────────────────────────────────────────────────
-
-def objective(hyperopt_params, exp_id: int, pipeline: str):
-    """Ray Tune objective — called once per trial."""
-    searched = {k: v for k, v in hyperopt_params.items() if k != "__trial_index__"}
-    resolved = _resolve_search_params(searched)
-
-    # Priority (right wins): config.json < FIXED_PARAMS < TRIAL_PARAMS
-    #                        < checkpoint < searched params
-    extra_configs = {
-        **FIXED_PARAMS,
-        **TRIAL_PARAMS,
-        **_checkpoint_params(),
-        **resolved,
-        "mlflow_experiment_id": exp_id,
-        "save_model_path": f"models/exp_{hyperopt_params['__trial_index__']}",
-    }
-
-    final_val_loss = run_experiment("experiment.csv", "config.json", -1, extra_configs, pipeline=pipeline)
-    print(f"loss: {final_val_loss}")
-    tune.report({"best val loss": final_val_loss})
-
-
-# ── MLflow warm-start history ─────────────────────────────────────────────────
-
 def _params_match_fixed(run_params: dict, fixed: dict, tol: float = 1e-6) -> bool:
     for k, v in fixed.items():
         if k not in run_params:
@@ -178,17 +230,45 @@ def _params_match_fixed(run_params: dict, fixed: dict, tol: float = 1e-6) -> boo
     return True
 
 
+# ── Objective ─────────────────────────────────────────────────────────────────
+
+def objective(hyperopt_params: dict, exp_id: int, pipeline: str):
+    """
+    Ray Tune objective — called once per trial.
+
+    Config priority (right wins):
+        config.json < FIXED_PARAMS < TRIAL_PARAMS < searched params
+    """
+    searched = {k: v for k, v in hyperopt_params.items() if k != "__trial_index__"}
+    resolved = _resolve_search_params(searched)
+
+    extra_configs = {
+        **FIXED_PARAMS,
+        **TRIAL_PARAMS,
+        **resolved,
+        "mlflow_experiment_id": exp_id,
+        "save_model_path": f"models/exp_{hyperopt_params['__trial_index__']}",
+    }
+
+    final_val_loss = run_experiment(
+        "experiment.csv", "config.json", -1,
+        extra_configs, pipeline=pipeline,
+    )
+    print(f"loss: {final_val_loss}")
+    tune.report({"best val loss": final_val_loss})
+
+
+# ── MLflow warm-start ─────────────────────────────────────────────────────────
+
 def load_history_from_mlflow(
     search_keys: set,
-    metric: str = "best val loss",
+    metric:      str = "best val loss",
 ) -> tuple[list[dict], list[float]]:
     """
-    Pull completed MLflow runs that match _fixed_params_for_filtering().
-    Returns only the keys currently being searched. POW2_PARAMS are converted
-    back to exponent form so they live in the same space as the search distribution.
+    Pull completed MLflow runs matching FIXED_PARAMS for TPE warm-starting.
+    POW2_PARAMS are converted back to exponent form to match the search space.
     """
-    client         = MlflowClient(tracking_uri=TRACKING_URI)
-    fixed_to_check = _fixed_params_for_filtering()
+    client = MlflowClient(tracking_uri=TRACKING_URI)
 
     runs = client.search_runs(
         experiment_ids=[e.experiment_id for e in client.search_experiments()],
@@ -197,7 +277,6 @@ def load_history_from_mlflow(
     )
 
     points, rewards, skipped = [], [], 0
-
     for run in runs:
         params  = run.data.params
         metrics = run.data.metrics
@@ -205,8 +284,7 @@ def load_history_from_mlflow(
         if metric not in metrics:
             skipped += 1
             continue
-
-        if not _params_match_fixed(params, fixed_to_check):
+        if not _params_match_fixed(params, FIXED_PARAMS):
             skipped += 1
             continue
 
@@ -216,7 +294,7 @@ def load_history_from_mlflow(
                 if k not in params:
                     raise KeyError(k)
                 raw = float(params[k])
-                # MLflow stores actual value (e.g. 64); convert back to exponent
+                # MLflow stores actual value (e.g. 32); convert back to exponent
                 point[k] = math.log2(raw) if k in POW2_PARAMS else raw
             points.append(point)
             rewards.append(float(metrics[metric]))
@@ -231,17 +309,22 @@ def load_history_from_mlflow(
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main(exp_id: int):
-    print("HyperParam_Opt started")
+    print(f"\nHyperParam_Opt")
+    print(f"  pipeline       : {PIPELINE}")
+    print(f"  gpus_per_trial : {GPUS_PER_TRIAL}")
+    print(f"  max_concurrent : {MAX_CONCURRENT}")
+    print(f"  checkpoint     : {CHECKPOINT['path']}")
+    print(f"  fixed params   : {list(FIXED_PARAMS.keys())}")
+    print(f"  searched params: {list(SEARCH_SPACE.keys())}")
+    print(f"  initial point  : {INITIAL_POINT}")
+    print(f"  trial params   : {list(TRIAL_PARAMS.keys())}")
+
     os.environ["RAY_CHDIR_TO_TRIAL_DIR"] = "0"
 
     search_keys = set(SEARCH_SPACE.keys())
     bounds      = _get_bounds(SEARCH_SPACE)
-    print(f"Search space:  {search_keys}")
-    print(f"Fixed params:  {FIXED_PARAMS}")
-    print(f"Trial params:  {TRIAL_PARAMS}")
-    print(f"Checkpoint:    {LOAD_MODEL_PATH}")
 
-    # 1. Load MLflow history and filter to current search bounds
+    # Load and filter MLflow history for TPE warm-start
     points, rewards = load_history_from_mlflow(search_keys)
     filtered_points, filtered_rewards = [], []
     for pt, rw in zip(points, rewards):
@@ -252,9 +335,9 @@ def main(exp_id: int):
             continue
         filtered_points.append(stripped)
         filtered_rewards.append(rw)
-    print(f"Usable historical points after bound filtering: {len(filtered_points)}")
+    print(f"\nUsable historical points after bound filtering: {len(filtered_points)}")
 
-    # 2. Seed Optuna
+    # Seed Optuna TPE
     if filtered_points:
         points_to_evaluate = filtered_points
         evaluated_rewards  = filtered_rewards
@@ -263,11 +346,10 @@ def main(exp_id: int):
             print("No MLflow history — seeding with INITIAL_POINT")
             points_to_evaluate = [INITIAL_POINT]
         else:
-            print("Warning: INITIAL_POINT is outside current bounds — starting cold")
+            print("Warning: INITIAL_POINT outside current search bounds — starting cold")
             points_to_evaluate = None
         evaluated_rewards = None
 
-    # 3. Build search algorithm
     algo = OptunaSearch(
         points_to_evaluate=points_to_evaluate,
         evaluated_rewards=evaluated_rewards,
@@ -277,11 +359,10 @@ def main(exp_id: int):
     algo = Repeater(algo, repeat=REPEAT)
     algo = ConcurrencyLimiter(algo, max_concurrent=MAX_CONCURRENT)
 
-    # 4. Launch
     tuner = tune.Tuner(
         tune.with_resources(
             tune.with_parameters(objective, exp_id=exp_id, pipeline=PIPELINE),
-            resources={"gpu": 1, "cpu": 1},
+            resources={"gpu": GPUS_PER_TRIAL, "cpu": 1},
         ),
         param_space=SEARCH_SPACE,
         tune_config=tune.TuneConfig(

@@ -1,44 +1,74 @@
 {
-  "data_processing": {
+  "_comment": "Shared config for prediction and compensation_v3 pipelines.",
+  "shared": {
+    "axis_selection": "x",
+    "downsample_factor": 1,
+    "random_seed": 0,
+    "num_epochs": 500,
+    "learning_rate": 0.001,
+    "gradient_clip_value": 1.0,
+    "early_stopping_patience": 50,
+    "early_stopping_min_delta": 0.0,
+    "validation_frequency": 1,
+    "train_val_split": 0.8888888888888888,
+    "verbose": 1,
+    "generate_plots": true,
+    "num_plot_samples": 3,
+    "return_history": true,
+    "num_workers": 4
+  },
+  "prediction": {
+    "data_file_path": "data/complete_error_prediction_data.npy",
+    "target_timesteps": 8000,
+    "model_type": "gru",
+    "hidden_size": 32,
+    "num_layers": 2,
+    "dropout": 0.0,
+    "bidirectional": false,
+    "include_velocity": true,
+    "include_acceleration": true,
     "motion_threshold": 0.9,
     "min_position_change": 0.0001,
-    "train_val_split": 0.8
-  },
-  
-  "input_features": {
-    "axis_selection": "x",
-    "include_velocity": true,
-    "include_acceleration": true
-  },
-  
-  "computational_settings": {
+    "base_loss": "mse",
+    "l2_weight": 0.0,
+    "jacobian_weight": 0.0,
+    "hidden_derivative_weight": 0.0,
     "jacobian_every_n_batches": 1,
-    "hidden_derivative_every_n_batches": 1
-  },
-  
-  "training_settings": {
-    "num_epochs": 500,
-    "early_stopping_patience": 1000,
-    "early_stopping_min_delta": 0.000001,
-    "validation_frequency": 1,
+    "hidden_derivative_every_n_batches": 1,
+    "max_abs_weight": 0.0,
+    "warmup_timesteps": 0,
     "optimizer_type": "adam",
-    "optimizer_kwargs": null,
-    "gradient_clip_value": null,
-    "bidirectional": true,
-    "save_best": false
+    "save_best_only": true,
+    "save_model_path": null,
+    "load_model_path": null,
+    "load_model_strict": true,
+    "batch_size": null,
+    "device": "cuda",
+    "plot_save_dir": "plots/prediction",
+    "tracking_uri": "http://hurco-lambda.hurco.com:8090",
+    "error_names": [
+      "e_enc",
+      "e_scale"
+    ]
   },
-  
-  "dataloader_settings": {
-    "num_workers": 0,
-    "batch_size": null
-  },
-  
-  "output_settings": {
-    "verbose": 1,
-    "return_history": true,
-    "generate_plots": false,
-    "plot_save_dir": "plots/",
-    "num_plot_samples": 10,
-    "error_names": ["e_enc", "e_scale"]
+  "compensation_v3": {
+    "data_path": "data/comp_dataset.npy",
+    "error_pred_checkpoint": "checkpoints/error_pred_x.pt",
+    "pred_hidden_size": 32,
+    "pred_num_layers": 2,
+    "comp_hidden_size": 32,
+    "comp_num_layers": 1,
+    "comp_dropout": 0.0,
+    "lambda_mlp": 0.0001,
+    "lambda_gru": 1e-05,
+    "warmup_timesteps": 0,
+    "gpu_pred": "cuda:0",
+    "gpu_comp": "cuda:1",
+    "save_best_only": true,
+    "save_model_path": null,
+    "batch_size": null,
+    "plot_save_dir": "plots/compensation_v3",
+    "mlflow_tracking_uri": "http://hurco-lambda.hurco.com:8090",
+    "mlflow_experiment_name": "compensation_v3"
   }
 }
