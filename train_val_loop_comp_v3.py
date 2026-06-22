@@ -137,11 +137,12 @@ def load_two_files(
 
     M_ev, N, L_ev, _ = ev.shape
     assert M_ev == M,  f"Trajectory count mismatch: kinematics M={M}, ev M={M_ev}"
-    assert L_ev == L or downsample_factor == 1,         f"Sequence length mismatch after downsample: kin L={L}, ev L={L_ev}"
+    assert L_ev == L, \
+    f"Sequence length mismatch: kinematics L={L}, ev L={L_ev} (before downsample)"
 
     if downsample_factor > 1:
         ev = ev[:, :, ::downsample_factor, :]
-
+        
     err_col   = EV_ERR_OFFSET + a
     vff_col   = EV_VFF_OFFSET + a
     ev_shared = np.ascontiguousarray(
