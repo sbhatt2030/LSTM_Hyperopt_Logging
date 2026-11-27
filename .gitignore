@@ -5,6 +5,7 @@ models/
 plots/
 data/
 *.db
-.npy 
+*.npy
+.~lock.*#
 __pycache__/
 OneDrive_1_4-8-2026/
